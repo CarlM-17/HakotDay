@@ -46,6 +46,15 @@ const ALL_STORES = { id: 'ALL', name: 'All stores', area: '' };
 const ROLE_LABELS = { user: 'Store', areamanager: 'Area manager', admin: 'Admin' };
 const LOG_HEADERS = ['Timestamp', 'Email', 'Name', 'HakotDate', 'StoreID', 'StoreName', 'Entry', 'Sales', 'TRX'];
 
+// Wines & Liquor: product list lives in the 'Wines&Liquor' tab (column B from row 3);
+// store entries go to 'WLData', one row per Date + Store + Item. Quantities are whole cases.
+// Slots hold the cases sold in that slot only; Total Sold = sum of slots.
+const WL_ITEMS_SHEET = 'Wines&Liquor';
+const WL_SHEET = 'WLData';
+const WL_HEADERS = ['Date', 'Area', 'StoreID', 'StoreName', 'Item', 'Allocation (cs)']
+  .concat(WINDOWS.map(w => (w.key === 'FINAL' ? 'FINAL' : w.label) + ' (cs)'), ['Total Sold (cs)', 'Sell-through %']);
+const WL_NCOLS = WL_HEADERS.length; // 15 -> A..O
+
 // ---------- HTTP helper ----------
 function request(method, url, headers, body) {
   return new Promise((resolve, reject) => {
@@ -117,6 +126,9 @@ function putValues(range, values) {
   return sheets('PUT', '/values/' + encodeURIComponent(range) + '?valueInputOption=USER_ENTERED',
     { majorDimension: 'ROWS', values });
 }
+function batchPutValues(data) {
+  return sheets('POST', '/values:batchUpdate', { valueInputOption: 'USER_ENTERED', data });
+}
 function appendValues(range, values) {
   return sheets('POST', '/values/' + encodeURIComponent(range) +
     ':append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS',
@@ -129,7 +141,7 @@ async function ensureSheets() {
   if (sheetsReady) return;
   const meta = await sheets('GET', '?fields=sheets.properties.title');
   const titles = (meta.sheets || []).map(s => s.properties.title);
-  const needed = [[USERS_SHEET, USER_HEADERS], [LOG_SHEET, LOG_HEADERS]].filter(([t]) => !titles.includes(t));
+  const needed = [[USERS_SHEET, USER_HEADERS], [LOG_SHEET, LOG_HEADERS], [WL_SHEET, WL_HEADERS]].filter(([t]) => !titles.includes(t));
   if (needed.length) {
     await sheets('POST', ':batchUpdate', {
       requests: needed.map(([title]) => ({ addSheet: { properties: { title } } })),
@@ -449,6 +461,112 @@ app.get('/api/data', requireUser, wrap(async (req, res) => {
     if (date) rows = rows.filter(r => r.date === date);
   }
   res.json({ rows: rows.map(publicRec) });
+}));
+
+// ---------- Wines & Liquor ----------
+async function loadWlItems() {
+  let rows;
+  try { rows = await getValues("'" + WL_ITEMS_SHEET + "'!B3:B"); }
+  catch (e) { throw new Error('The ' + WL_ITEMS_SHEET + ' tab was not found. Add it with the item list in column B.'); }
+  const seen = new Set();
+  return rows.map(r => idStr(r[0]))
+    .filter(n => n && n.toLowerCase() !== 'description' && !seen.has(n) && seen.add(n));
+}
+async function loadWlRows() {
+  await ensureSheets();
+  const rows = await getValues(WL_SHEET + '!A2:O');
+  const out = [];
+  rows.forEach((r, i) => {
+    const c = r.slice();
+    while (c.length < WL_NCOLS) c.push('');
+    const rec = {
+      row: i + 2, date: isoDate(c[0]), area: idStr(c[1]), storeId: idStr(c[2]),
+      storeName: idStr(c[3]), item: idStr(c[4]), alloc: num(c[5]), q: {},
+    };
+    WINDOWS.forEach((w, j) => { rec.q[w.key] = num(c[6 + j]); });
+    if (rec.date && rec.storeId && rec.item) out.push(rec);
+  });
+  return out;
+}
+function wlCells(r) {
+  const id = /^\d+$/.test(r.storeId) ? Number(r.storeId) : safeText(r.storeId);
+  let sold = 0, any = false;
+  const qs = WINDOWS.map(w => { const v = r.q[w.key]; if (v !== '') { sold += v; any = true; } return v; });
+  return [r.date, safeText(r.area), id, safeText(r.storeName), safeText(r.item), r.alloc]
+    .concat(qs, [any ? sold : '', any && r.alloc > 0 ? pctText(sold, r.alloc) : '']);
+}
+const wlPublic = r => ({ date: r.date, area: r.area, storeId: r.storeId, storeName: r.storeName, item: r.item, alloc: r.alloc, q: r.q });
+// '' = not entered; null = invalid; otherwise a whole number of cases >= 0
+function caseQty(v) {
+  if (v === '' || v === null || v === undefined) return '';
+  const n = num(v);
+  return n === '' || n < 0 || Math.round(n) !== n ? null : n;
+}
+
+// Store: its own rows for the date. Admin / area manager: every store in scope for the date.
+app.get('/api/wl', requireUser, wrap(async (req, res) => {
+  const date = idStr(req.query.date);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Invalid date.' });
+  const [items, all] = await Promise.all([loadWlItems(), loadWlRows()]);
+  const scope = req.user.scope;
+  const rows = all.filter(r => r.date === date && (!scope || scope.includes(r.storeId)));
+  res.json({ items, rows: rows.map(wlPublic) });
+}));
+
+// Body: { date, alloc: {item: cases} }  or  { date, window: { key, qty: {item: cases} } }
+app.post('/api/wl/save', requireUser, wrap(async (req, res) => {
+  if (req.user.viewer) {
+    return res.status(403).json({ error: 'Admin and area manager accounts are view-only. Only store accounts can encode.' });
+  }
+  const date = idStr(req.body.date);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Invalid date.' });
+  const store = (await loadStores()).find(s => s.id === req.user.storeId);
+  if (!store) return res.status(400).json({ error: 'Your store is not in ListOfStores.' });
+  const [items, all] = await Promise.all([loadWlItems(), loadWlRows()]);
+  const byItem = new Map(all.filter(r => r.date === date && r.storeId === store.id).map(r => [r.item, r]));
+  const blank = item => ({ date, storeId: store.id, item, alloc: '', q: Object.fromEntries(WINDOWS.map(w => [w.key, ''])) });
+  const touched = [];
+  let logEntry;
+
+  if (req.body.alloc) {
+    let total = 0;
+    for (const item of items) {
+      const v = caseQty(req.body.alloc[item]);
+      if (v === '' || v === null) return res.status(400).json({ error: 'Enter the allocation for every item in whole cases (use 0 if none): ' + item });
+      const rec = byItem.get(item) || blank(item);
+      rec.alloc = v; total += v; touched.push(rec);
+    }
+    logEntry = ['W&L Allocation', total];
+  } else if (req.body.window) {
+    const w = WINDOWS.find(x => x.key === idStr(req.body.window.key));
+    if (!w) return res.status(400).json({ error: 'Unknown time slot.' });
+    const qty = req.body.window.qty || {};
+    let total = 0;
+    for (const item of items) {
+      if (!(item in qty)) continue;
+      const v = caseQty(qty[item]);
+      if (v === null) return res.status(400).json({ error: 'Use whole cases (0 or more) for ' + item + '.' });
+      const rec = byItem.get(item);
+      if (!rec || rec.alloc === '') return res.status(400).json({ error: 'Save the allocation before encoding time slots.' });
+      rec.q[w.key] = v; if (v !== '') total += v; touched.push(rec);
+    }
+    if (!touched.length) return res.status(400).json({ error: 'Nothing to save.' });
+    logEntry = ['W&L ' + w.label, total];
+  } else {
+    return res.status(400).json({ error: 'Nothing to save.' });
+  }
+
+  touched.forEach(r => { r.area = store.area; r.storeName = store.name; });
+  const updates = touched.filter(r => r.row).map(r => ({ range: WL_SHEET + '!A' + r.row + ':O' + r.row, values: [wlCells(r)] }));
+  const inserts = touched.filter(r => !r.row).map(wlCells);
+  if (updates.length) await batchPutValues(updates);
+  if (inserts.length) await appendValues(WL_SHEET + '!A:O', inserts);
+  await appendValues(LOG_SHEET + '!A:I', [[
+    nowPH(), safeText(req.user.email), safeText(req.user.name), date, Number(store.id) || store.id,
+    safeText(store.name), logEntry[0], logEntry[1], '',
+  ]]);
+  const mine = items.map(i => byItem.get(i) || touched.find(t => t.item === i)).filter(Boolean);
+  res.json({ rows: mine.map(wlPublic) });
 }));
 
 app.post('/api/save', requireUser, wrap(async (req, res) => {
@@ -946,6 +1064,19 @@ th[aria-sort="ascending"] .sort-ic,th[aria-sort="descending"] .sort-ic{opacity:1
 .cell-user b{display:block;font-weight:600;color:var(--text)}
 .cell-user span{font-size:12px;color:var(--text-3)}
 td.wrap{white-space:normal;min-width:200px;max-width:340px}
+.st-cell{display:inline-flex;align-items:center;gap:10px;justify-content:flex-end}
+.st-bar{width:88px;height:6px;border-radius:99px;background:var(--track);overflow:hidden;flex:none}
+.st-bar i{display:block;height:100%;background:var(--series);border-radius:99px}
+.st-bar.full i{background:var(--good-fill)}
+.dt td.item{white-space:normal;min-width:220px;font-weight:500;color:var(--text)}
+.qty-in{width:92px;height:34px;text-align:right;padding:0 10px}
+.dt td .err-msg{justify-content:flex-end;margin-top:4px}
+.wl-stack{display:grid;gap:16px}
+.wl-stack .card+.card{margin-top:0}
+.lock-note{display:flex;gap:10px;align-items:center;padding:14px 16px;color:var(--text-2);font-size:13.5px}
+.lock-note .ic{width:18px;height:18px;color:var(--text-3)}
+.over{color:var(--danger);font-weight:600}
+@media (max-width:640px){.qty-in{width:76px;height:40px}}
 .td-actions{display:flex;gap:6px;justify-content:flex-end}
 .table-foot{display:flex;justify-content:space-between;gap:12px;padding:10px 16px;font-size:12.5px;color:var(--text-3);border-top:1px solid var(--border);flex-wrap:wrap}
 
@@ -1020,7 +1151,7 @@ td.wrap{white-space:normal;min-width:200px;max-width:340px}
 var WINS=[{k:'10AM',l:'10:00 AM'},{k:'12PM',l:'12:00 PM'},{k:'3PM',l:'3:00 PM'},{k:'4PM',l:'4:00 PM'},{k:'6PM',l:'6:00 PM'},{k:'9PM',l:'9:00 PM'},{k:'FINAL',l:'Final Sales'}];
 var SHORT={'10AM':'10 AM','12PM':'12 PM','3PM':'3 PM','4PM':'4 PM','6PM':'6 PM','9PM':'9 PM','FINAL':'Final'};
 var METRICS=[{k:'sales',l:'Sales'},{k:'trx',l:'TRX'},{k:'basket',l:'Basket'},{k:'vs',l:'VS LY'}];
-var PAGES={encode:{t:'Encode Sales',ic:'edit'},history:{t:'Sales History',ic:'history'},dashboard:{t:'Store Performance',ic:'dashboard'},users:{t:'User Accounts',ic:'users'}};
+var PAGES={encode:{t:'Encode Sales',ic:'edit'},wl:{t:'Wines & Liquor',ic:'wine'},history:{t:'Sales History',ic:'history'},dashboard:{t:'Store Performance',ic:'dashboard'},users:{t:'User Accounts',ic:'users'}};
 var STORE_STATUS={none:{l:'Not started',c:''},progress:{l:'In progress',c:'info'},final:{l:'Final',c:'success'}};
 var USER_STATUS={pending:{l:'Pending',c:'warning'},approved:{l:'Approved',c:'success'},disabled:{l:'Disabled',c:'danger'}};
 var PESO='₱';
@@ -1059,6 +1190,8 @@ var IC={
   inbox:'<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
   trend:'<path d="M22 7 13.5 15.5 8.5 10.5 2 17"/><path d="M16 7h6v6"/>',
   filter:'<path d="M22 3H2l8 9.46V19l4 2v-8.54z"/>',
+  wine:'<path d="M8 22h8"/><path d="M7 10h10"/><path d="M12 15v7"/><path d="M12 15a5 5 0 0 0 5-5c0-2-.5-4-2-8H9c-1.5 4-2 6-2 8a5 5 0 0 0 5 5Z"/>',
+  lock:'<rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
   store:'<path d="m2 7 4.41-4.41A2 2 0 0 1 7.83 2h8.34a2 2 0 0 1 1.42.59L22 7"/><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="M2 7h20"/><path d="M22 7v3a2 2 0 0 1-2 2 2.7 2.7 0 0 1-2-.9 2.7 2.7 0 0 1-2 .9 2.7 2.7 0 0 1-2-.9 2.7 2.7 0 0 1-2 .9 2.7 2.7 0 0 1-2-.9 2.7 2.7 0 0 1-2 .9 2.7 2.7 0 0 1-2-.9A2 2 0 0 1 2 10V7"/>'
 };
 var BRAND='<img class="brand-mark" src="/favicon-64.png" width="32" height="32" alt="" aria-hidden="true">';
@@ -1078,7 +1211,8 @@ var S={
   authTab:'login',authNote:null,editLY:false,installEvt:null,
   f:{q:'',areas:[],status:'all'},sort:{key:'',dir:1},
   histQ:'',hsort:{key:'date',dir:-1},
-  userTab:'',userQ:'',usort:{key:'',dir:1}
+  userTab:'',userQ:'',usort:{key:'',dir:1},
+  wl:{date:null,items:[],rows:[],loading:false,error:null},wlWin:null,wlEdit:false,wlTab:'item',wlSort:{key:'',dir:1}
 };
 
 /* ================= Helpers ================= */
@@ -1230,7 +1364,7 @@ function field(o){ // {id,label,val,req,money,type,name,auto,help,mode,post}
 }
 
 /* ================= Router & shell ================= */
-function allowedPages(){return isViewer()?(isAdmin()?['dashboard','users']:['dashboard']):['encode','history']}
+function allowedPages(){return isViewer()?(isAdmin()?['dashboard','wl','users']:['dashboard','wl']):['encode','wl','history']}
 function defaultPage(){return isViewer()?'dashboard':'encode'}
 function readRoute(){var p=(location.hash||'').replace(/^#\/?/,'');return allowedPages().indexOf(p)>=0?p:defaultPage()}
 function go(p){if(location.hash==='#/'+p){S.page=p;renderApp()}else location.hash='#/'+p}
@@ -1257,7 +1391,7 @@ function userMenu(){
   return h+'<div class="pop-sep"></div><button class="menu-item danger" role="menuitem" data-act="logout">'+icon('logout')+'Sign out</button></div>';
 }
 function renderShell(){
-  var work=isViewer()?['dashboard']:['encode','history'];
+  var work=isViewer()?['dashboard','wl']:['encode','wl','history'];
   var sb='<aside class="sidebar" id="sidebar" aria-label="Sidebar"><div class="brand">'+BRAND+'<div class="brand-text"><div class="brand-name">Hakot Day</div><div class="brand-sub">Sales Monitoring</div></div></div>';
   sb+='<nav class="nav" aria-label="Main navigation"><div class="nav-sec">Workspace</div>'+work.map(function(p){return navItem(p)}).join('');
   if(isAdmin())sb+='<div class="nav-sec">Administration</div>'+navItem('users',pendingCount());
@@ -1273,7 +1407,7 @@ function renderShell(){
 }
 function renderPage(){
   var p=S.page,ct=$('content');if(chartRO&&ct){chartRO.disconnect();lastW=0;chartRO.observe(ct)}document.title=PAGES[p].t+' · Hakot Day';
-  if(p==='encode')renderEncode();else if(p==='history')renderHistory();else if(p==='dashboard')renderDashboard();else if(p==='users')renderUsers();
+  if(p==='encode')renderEncode();else if(p==='history')renderHistory();else if(p==='dashboard')renderDashboard();else if(p==='users')renderUsers();else if(p==='wl')renderWl();
 }
 function closeMenus(keep){document.querySelectorAll('.pop').forEach(function(p){if(p.id===keep)return;p.hidden=true;var b=document.querySelector('[data-m="'+p.id.slice(4)+'"]');if(b)b.setAttribute('aria-expanded','false')})}
 function toggleMenu(m){var p=$('pop-'+m);if(!p)return;var open=p.hidden;closeMenus(open?p.id:null);p.hidden=!open;var b=document.querySelector('[data-m="'+m+'"]');if(b)b.setAttribute('aria-expanded',String(open));if(open){var f=p.querySelector('button,input');if(f)f.focus()}}
@@ -1747,6 +1881,161 @@ async function setStatus(btn){
   finally{S.busy=false}
 }
 
+/* ================= Wines & Liquor ================= */
+function refreshFiltered(){if(S.page==='wl')renderWlViewerBody();else renderDashBody()}
+async function loadWl(){
+  S.wl.loading=true;S.wl.error=null;
+  try{var j=await api('/api/wl?date='+encodeURIComponent(S.date));S.wl.items=j.items||[];S.wl.rows=j.rows||[];S.wl.date=S.date}
+  catch(e){S.wl.error=e.message;S.wl.date=S.date}
+  S.wl.loading=false;
+}
+function renderWl(){
+  if(S.wl.date!==S.date&&!S.wl.loading)loadWl().then(function(){if(S.page==='wl')renderWl()});
+  if(isViewer())renderWlViewer();else renderWlStore();
+}
+function cs(v){return v===''||v==null?'—':int(v)+' cs'}
+function wlSold(r){var s=0;if(r)WINS.forEach(function(w){var v=r.q[w.k];if(v!==''&&v!=null)s+=v});return s}
+function wlHas(r,k){return !!r&&r.q[k]!==''&&r.q[k]!=null}
+function stCell(sold,alloc){if(!(alloc>0))return '<span class="muted">—</span>';var p=sold/alloc;return '<span class="st-cell"><span class="st-bar'+(p>=1?' full':'')+'" aria-hidden="true"><i style="width:'+Math.min(100,p*100).toFixed(1)+'%"></i></span><span>'+pct(p)+'</span></span>'}
+function wlStateBlock(){
+  if(S.wl.loading||S.wl.date!==S.date)return skelKpis(3)+skelTable(8);
+  if(S.wl.error)return '<div class="card">'+stateBlock('alert','Unable to load Wines & Liquor',esc(S.wl.error),'<button class="btn btn-primary" data-act="wl-retry">'+icon('refresh')+'Try again</button>')+'</div>';
+  if(!S.wl.items.length)return '<div class="card">'+stateBlock('wine','No items listed yet','Add the product descriptions in column B of the Wines&Liquor tab (from row 3), then refresh.','<button class="btn" data-act="wl-retry">'+icon('refresh')+'Refresh</button>')+'</div>';
+  return '';
+}
+function wlMine(){var m={};S.wl.rows.forEach(function(r){if(r.storeId===String(S.me.storeId))m[r.item]=r});return m}
+
+/* ---- Store: allocation first, then cases sold per slot ---- */
+function renderWlStore(){
+  var st=storeById(S.me.storeId);
+  var h=pageHead('Wines & Liquor',esc(st?st.id+' · '+st.name:S.me.storeId)+' · '+esc(fmtDate(S.date))+' · quantities in cases',dateCtl()+'<button class="btn" data-act="wl-export">'+icon('download')+'Export CSV</button>');
+  var blk=wlStateBlock();if(blk){$('content').innerHTML=h+blk;return}
+  var items=S.wl.items,mine=wlMine();
+  var allocDone=items.every(function(it){return mine[it]&&mine[it].alloc!==''});
+  var totA=0,totS=0;items.forEach(function(it){var r=mine[it];if(r&&r.alloc!=='')totA+=r.alloc;totS+=wlSold(r)});
+  h+='<div class="kpis">'+kpi({label:'Allocation',value:allocDone?cs(totA):'—',foot:allocDone?items.length+' items':'Not yet encoded'})+kpi({label:'Sold',value:cs(totS),foot:allocDone&&totA>0?'<span>'+cs(Math.max(0,totA-totS))+' remaining</span>':'—'})+kpi({label:'Sell-through',value:totA>0?pct(totS/totA):'—',meter:totA>0?meterHtml(totS/totA,'Cases sold as percent of allocation'):'',foot:'Sold ÷ allocation'})+'</div>';
+  h+='<div class="wl-stack">'+wlAllocCard(items,mine,allocDone)+wlSlotCard(items,mine,allocDone)+wlSummaryCard(items,mine)+'</div>';
+  $('content').innerHTML=h;
+}
+function wlAllocCard(items,mine,done){
+  var edit=!done||S.wlEdit;
+  var h='<section class="card" aria-labelledby="wa-t"><div class="card-h"><div><h2 class="card-t" id="wa-t">Step 1 · Allocation</h2><div class="card-s">Cases allocated to your store for this Hakot Day. Required before encoding time slots.</div></div>'+(done?'<span class="badge success">'+icon('check')+'Saved</span>':'<span class="badge warning">Required first</span>')+'</div>';
+  if(!edit){
+    var tot=0;items.forEach(function(it){tot+=mine[it].alloc});
+    return h+'<div class="card-b"><div class="ly-box"><div><span class="mini-l">Items</span><span class="mini-v">'+items.length+'</span></div><div><span class="mini-l">Total allocation</span><span class="mini-v">'+cs(tot)+'</span></div><div class="sp"></div><button class="btn btn-ghost btn-sm" data-act="wl-edit-alloc">'+icon('edit')+'Edit</button></div></div></section>';
+  }
+  h+='<div class="table-wrap" style="max-height:none"><table class="dt'+(PREF.density==='compact'?' dense':'')+'"><caption class="sr-only">Allocation per item in cases</caption><thead><tr><th scope="col" class="l">Item</th><th scope="col">Allocation (cases)<span class="req" aria-hidden="true">*</span></th></tr></thead><tbody>';
+  items.forEach(function(it,i){var r=mine[it];h+='<tr><td class="l item"><label for="wa-'+i+'">'+esc(it)+'</label></td><td><input class="input num qty-in" id="wa-'+i+'" inputmode="numeric" autocomplete="off" value="'+esc(r&&r.alloc!==''?r.alloc:'')+'" aria-required="true" aria-describedby="wa-'+i+'-err"><div class="err-msg" id="wa-'+i+'-err" hidden></div></td></tr>'});
+  return h+'</tbody></table></div><div class="card-b"><p class="help" style="margin:0 0 12px">Enter 0 for items you did not receive.</p><div class="row-actions" style="margin:0"><button class="btn btn-primary" data-act="wl-save-alloc">'+icon('check')+'Save allocation</button>'+(S.wlEdit?'<button class="btn btn-ghost" data-act="wl-cancel-alloc">Cancel</button>':'')+'</div></div></section>';
+}
+function wlNextWin(mine){for(var i=0;i<WINS.length;i++){var k=WINS[i].k;if(!S.wl.items.some(function(it){return wlHas(mine[it],k)}))return k}return null}
+function wlSlotCard(items,mine,done){
+  var h='<section class="card" aria-labelledby="wq-t"><div class="card-h"><div><h2 class="card-t" id="wq-t">Step 2 · Cases sold per time slot</h2><div class="card-s">Enter only the cases sold during the selected slot · blank = none</div></div></div>';
+  if(!done)return h+'<div class="lock-note">'+icon('lock')+'<span>Save the allocation first to unlock the time slots.</span></div></section>';
+  var nx=wlNextWin(mine);if(!S.wlWin)S.wlWin=nx||'FINAL';var k=S.wlWin;
+  h+='<div class="sec"><div class="slots" role="radiogroup" aria-label="Time slot">';
+  WINS.forEach(function(w){var d=items.some(function(it){return wlHas(mine[it],w.k)}),sel=k===w.k;h+='<button class="slot'+(d?' done':'')+(sel?' sel':'')+(nx===w.k&&!d?' next':'')+'" role="radio" aria-checked="'+sel+'" data-act="wl-win" data-k="'+w.k+'"><span class="slot-l">'+SHORT[w.k]+'</span><span class="slot-s">'+(d?icon('check')+'Saved':nx===w.k?'Next':'Open')+'</span></button>'});
+  h+='</div></div><div class="table-wrap" style="max-height:none"><table class="dt'+(PREF.density==='compact'?' dense':'')+'"><caption class="sr-only">Cases sold in the '+esc(winLabel(k))+' slot</caption><thead><tr><th scope="col" class="l">Item</th><th scope="col">Allocation</th><th scope="col">Sold before</th><th scope="col">'+esc(SHORT[k])+' (cases)</th><th scope="col">Total sold</th><th scope="col">Sell-through</th></tr></thead><tbody>';
+  items.forEach(function(it,i){
+    var r=mine[it],cur=wlHas(r,k)?r.q[k]:'',before=wlSold(r)-(cur===''?0:cur);
+    h+='<tr><td class="l item"><label for="wq-'+i+'">'+esc(it)+'</label></td><td>'+int(r.alloc)+'</td><td>'+int(before)+'</td><td><input class="input num qty-in" id="wq-'+i+'" data-before="'+before+'" data-alloc="'+r.alloc+'" inputmode="numeric" autocomplete="off" value="'+esc(cur)+'" aria-describedby="wq-'+i+'-err"><div class="err-msg" id="wq-'+i+'-err" hidden></div></td><td id="wt-'+i+'">'+int(before+(cur===''?0:cur))+'</td><td id="wp-'+i+'">'+stCell(before+(cur===''?0:cur),r.alloc)+'</td></tr>';
+  });
+  return h+'</tbody></table></div><div class="card-b"><button class="btn btn-primary btn-block btn-lg" data-act="wl-save-slot">'+icon('check')+'Save '+esc(winLabel(k))+'</button></div></section>';
+}
+function updateWlRow(i){
+  var el=$('wq-'+i);if(!el)return;var v=num(el.value),before=+el.getAttribute('data-before'),alloc=+el.getAttribute('data-alloc');
+  var tot=before+(v===''?0:v);$('wt-'+i).innerHTML='<span class="'+(alloc>=0&&tot>alloc?'over':'')+'">'+int(tot)+'</span>';$('wp-'+i).innerHTML=stCell(tot,alloc);
+}
+function wlSummaryCard(items,mine){
+  var h='<section class="card" aria-labelledby="wsum-t"><div class="card-h"><div><h2 class="card-t" id="wsum-t">Summary · '+esc(fmtDateShort(S.date))+'</h2><div class="card-s">Cases sold per slot, total sold and sell-through vs allocation</div></div></div><div class="table-wrap"><table class="dt'+(PREF.density==='compact'?' dense':'')+'"><caption class="sr-only">Wines and liquor summary</caption><thead><tr><th scope="col" class="l frz solo">Item</th><th scope="col">Allocation</th>';
+  WINS.forEach(function(w,j){h+='<th scope="col"'+(j===0?' class="gs"':'')+'>'+SHORT[w.k]+'</th>'});
+  h+='<th scope="col" class="gs">Total sold</th><th scope="col">Sell-through</th></tr></thead><tbody>';
+  var tA=0,tS=0,tW={};
+  items.forEach(function(it){var r=mine[it],a=r&&r.alloc!==''?r.alloc:'',sold=wlSold(r);if(a!=='')tA+=a;tS+=sold;
+    h+='<tr><td class="l frz solo item">'+esc(it)+'</td><td>'+int(a)+'</td>'+WINS.map(function(w,j){var v=wlHas(r,w.k)?r.q[w.k]:'';if(v!=='')tW[w.k]=(tW[w.k]||0)+v;return '<td'+(j===0?' class="gs"':'')+'>'+int(v)+'</td>'}).join('')+'<td class="gs"><span class="'+(a!==''&&sold>a?'over':'')+'">'+int(sold)+'</span></td><td>'+stCell(sold,a)+'</td></tr>'});
+  h+='<tr class="grand"><td class="l frz solo">Total</td><td>'+int(tA)+'</td>'+WINS.map(function(w,j){return '<td'+(j===0?' class="gs"':'')+'>'+int(tW[w.k]==null?'':tW[w.k])+'</td>'}).join('')+'<td class="gs">'+int(tS)+'</td><td>'+stCell(tS,tA)+'</td></tr>';
+  return h+'</tbody></table></div></section>';
+}
+async function saveWlAlloc(btn){
+  var items=S.wl.items,alloc={},bad=null;
+  items.forEach(function(it,i){var raw=$('wa-'+i).value.trim(),n=num(raw),ok=raw!==''&&n!==''&&n>=0&&Math.round(n)===n;setErr('wa-'+i,ok?'':raw===''?'Required':'Whole cases, 0 or more');if(!ok&&bad==null)bad=i;alloc[it]=n});
+  if(bad!=null){$('wa-'+bad).focus();return}
+  await withBusy(btn,async function(){
+    var j=await api('/api/wl/save',{date:S.date,alloc:alloc});
+    S.wl.rows=S.wl.rows.filter(function(r){return r.storeId!==String(S.me.storeId)}).concat(j.rows||[]);
+    S.wlEdit=false;toast('Allocation saved','success');renderWl();
+  });
+}
+async function saveWlSlot(btn){
+  var items=S.wl.items,qty={},bad=null,over=[],k=S.wlWin;
+  items.forEach(function(it,i){
+    var el=$('wq-'+i),raw=el.value.trim(),n=raw===''?'':num(raw),ok=raw===''||(n!==''&&n>=0&&Math.round(n)===n);
+    setErr('wq-'+i,ok?'':'Whole cases, 0 or more');if(!ok&&bad==null)bad=i;qty[it]=n;
+    var tot=+el.getAttribute('data-before')+(n===''?0:n),a=+el.getAttribute('data-alloc');if(ok&&tot>a)over.push(esc(it)+': <b>'+tot+'</b> of '+a+' cs');
+  });
+  if(bad!=null){$('wq-'+bad).focus();return}
+  if(over.length&&!(await confirmDialog({title:'Sold more than allocated?',html:'These items would go over their allocation:<br>'+over.join('<br>'),ok:'Save anyway'})))return;
+  await withBusy(btn,async function(){
+    var j=await api('/api/wl/save',{date:S.date,window:{key:k,qty:qty}});
+    S.wl.rows=S.wl.rows.filter(function(r){return r.storeId!==String(S.me.storeId)}).concat(j.rows||[]);
+    toast(winLabel(k)+' saved','success');S.wlWin=wlNextWin(wlMine())||k;renderWl();
+  });
+}
+
+/* ---- Admin / area manager: allocation vs sold totals ---- */
+function renderWlViewer(){
+  var scope=S.me.scope?myStores().length+' stores in your scope':'All stores';
+  var h=pageHead('Wines & Liquor',esc(scope)+' · '+esc(fmtDate(S.date))+' · cases · <span class="badge">'+icon('eye')+'View only</span>','<button class="btn" data-act="wl-refresh">'+icon('refresh')+'Refresh</button><button class="btn" data-act="wl-export">'+icon('download')+'Export CSV</button>');
+  h+='<div class="filterbar" role="search" aria-label="Filters">'+dateCtl()+'<span class="fsep" aria-hidden="true"></span>'+areaFilterHtml()+searchBox('wlQ','Search store or ID',S.f.q)+'<button class="btn btn-ghost" data-act="clear-filters" id="clearF"'+(activeFilters()?'':' hidden')+'>'+icon('x')+'Clear filters <span class="badge info" id="fCount">'+activeFilters()+'</span></button></div><div id="wlBody"></div>';
+  $('content').innerHTML=h;renderWlViewerBody();
+}
+function wlScopeStores(){var q=S.f.q.trim().toLowerCase();return myStores().filter(function(s){return (!S.f.areas.length||S.f.areas.indexOf(s.area)>=0)&&(!q||(s.id+' '+s.name).toLowerCase().indexOf(q)>=0)})}
+function renderWlViewerBody(){
+  var el=$('wlBody');if(!el)return;syncFilterUi();
+  var blk=wlStateBlock();if(blk){el.innerHTML=blk;return}
+  var stores=wlScopeStores(),ids={};stores.forEach(function(s){ids[s.id]=s});
+  if(!stores.length){el.innerHTML='<div class="card">'+stateBlock('filter','No stores match the selected filters','Try a different area or search term.','<button class="btn" data-act="clear-filters">'+icon('x')+'Clear filters</button>')+'</div>';return}
+  var rows=S.wl.rows.filter(function(r){return ids[r.storeId]&&S.wl.items.indexOf(r.item)>=0});
+  var byItem={},byStore={},tA=0,tS=0;
+  S.wl.items.forEach(function(it){byItem[it]={name:it,a:0,s:0,n:0}});
+  rows.forEach(function(r){var a=r.alloc===''?0:r.alloc,sd=wlSold(r),bi=byItem[r.item];bi.a+=a;bi.s+=sd;if(r.alloc!=='')bi.n++;
+    var bs=byStore[r.storeId]||(byStore[r.storeId]={s:ids[r.storeId],a:0,sd:0});bs.a+=a;bs.sd+=sd;tA+=a;tS+=sd});
+  var reporting=Object.keys(byStore).length;
+  var h='<div class="kpis">'+kpi({label:'Total allocation',value:cs(tA),foot:S.wl.items.length+' items'})+kpi({label:'Total sold',value:cs(tS),foot:tA>0?'<span>'+cs(Math.max(0,tA-tS))+' remaining</span>':'—'})+kpi({label:'Sell-through',value:tA>0?pct(tS/tA):'—',meter:tA>0?meterHtml(tS/tA,'Cases sold as percent of allocation'):'',foot:'Sold ÷ allocation'})+kpi({label:'Stores reporting',value:reporting+' / '+stores.length,meter:meterHtml(stores.length?reporting/stores.length:0,'Stores with allocation encoded'),foot:'Allocation encoded'})+'</div>';
+  function tab(k,l){return '<button class="tab" role="tab" aria-selected="'+(S.wlTab===k)+'" data-act="wl-tab" data-t="'+k+'">'+l+'</button>'}
+  h+='<section class="card"><div class="card-h toolbar tabs-bar"><div class="tabs" role="tablist" aria-label="Totals view">'+tab('item','By item')+tab('store','By store')+'</div><div class="tools" style="padding:8px 0">'+densityBtn()+'</div></div>';
+  var st=S.wlSort,a='wl-sort',d=PREF.density==='compact'?' dense':'';
+  function sortList(list,get){if(!st.key)return list;return list.slice().sort(function(x,y){var p=get(x,st.key),q=get(y,st.key);return (p<q?-1:p>q?1:0)*st.dir})}
+  function val(o,k){return k==='name'?o.name.toLowerCase():k==='a'?o.a:k==='s'?o.s:k==='p'?(o.a>0?o.s/o.a:-1):0}
+  if(S.wlTab==='item'){
+    var list=sortList(S.wl.items.map(function(it){return byItem[it]}),val);
+    h+='<div class="table-wrap"><table class="dt'+d+'"><caption class="sr-only">Allocation vs sold by item</caption><thead><tr>'+sortTh('name','Item',st,a,'l')+'<th scope="col">Stores</th>'+sortTh('a','Allocation (cs)',st,a)+sortTh('s','Sold (cs)',st,a)+sortTh('p','Sell-through',st,a)+'</tr></thead><tbody>';
+    list.forEach(function(o){h+='<tr><td class="l item">'+esc(o.name)+'</td><td>'+o.n+'</td><td>'+int(o.a)+'</td><td>'+int(o.s)+'</td><td>'+stCell(o.s,o.a)+'</td></tr>'});
+    h+='<tr class="grand"><td class="l">Total</td><td>'+reporting+'</td><td>'+int(tA)+'</td><td>'+int(tS)+'</td><td>'+stCell(tS,tA)+'</td></tr></tbody></table></div>';
+  }else{
+    var sl=stores.map(function(s){var b=byStore[s.id];return {store:s,name:s.name,a:b?b.a:0,s:b?b.sd:0,has:!!b}});
+    h+='<div class="table-wrap"><table class="dt'+d+'"><caption class="sr-only">Allocation vs sold by store</caption><thead><tr><th scope="col" class="l c-id">ID</th>'+sortTh('name','Store',st,a,'l')+sortTh('a','Allocation (cs)',st,a)+sortTh('s','Sold (cs)',st,a)+sortTh('p','Sell-through',st,a)+'</tr></thead><tbody>';
+    scopeAreas().forEach(function(area){
+      var grp=sortList(sl.filter(function(o){return o.store.area===area}),val);if(!grp.length)return;
+      var ga=0,gs=0;grp.forEach(function(o){ga+=o.a;gs+=o.s});
+      h+='<tr class="group"><td colspan="5"><span class="glabel">'+esc(area)+'<span class="muted">'+grp.length+' store'+(grp.length===1?'':'s')+'</span></span></td></tr>';
+      grp.forEach(function(o){h+='<tr><td class="l c-id">'+esc(o.store.id)+'</td><td class="l">'+esc(o.name)+(o.has?'':' <span class="badge">No allocation</span>')+'</td><td>'+(o.has?int(o.a):'')+'</td><td>'+(o.has?int(o.s):'')+'</td><td>'+(o.has?stCell(o.s,o.a):'<span class="muted">—</span>')+'</td></tr>'});
+      var gHas=grp.some(function(o){return o.has});
+      h+='<tr class="sub"><td class="l"></td><td class="l">Subtotal</td><td>'+(gHas?int(ga):'')+'</td><td>'+(gHas?int(gs):'')+'</td><td>'+(gHas?stCell(gs,ga):'<span class="muted">—</span>')+'</td></tr>';
+    });
+    h+='<tr class="grand"><td class="l"></td><td class="l">Grand total</td><td>'+int(tA)+'</td><td>'+int(tS)+'</td><td>'+stCell(tS,tA)+'</td></tr></tbody></table></div>';
+  }
+  el.innerHTML=h+'<div class="table-foot"><span>Sell-through = cases sold ÷ cases allocated · '+esc(fmtDate(S.date))+'</span></div></section>';
+}
+function exportWl(){
+  var ids={};(isViewer()?wlScopeStores():[storeById(S.me.storeId)]).forEach(function(s){if(s)ids[s.id]=s});
+  var rows=S.wl.rows.filter(function(r){return ids[r.storeId]});
+  if(!rows.length){toast('Nothing to export for this date.','warning');return}
+  var out=[['Date','Area','Store ID','Store','Item','Allocation (cs)'].concat(WINS.map(function(w){return (w.k==='FINAL'?'Final':w.l)+' (cs)'}),['Total sold (cs)','Sell-through %'])];
+  rows.forEach(function(r){var sd=wlSold(r);out.push([r.date,r.area,r.storeId,r.storeName,r.item,r.alloc].concat(WINS.map(function(w){return r.q[w.k]}),[sd,r.alloc>0?(sd/r.alloc*100).toFixed(2):'']))});
+  downloadCsv('wines-liquor-'+S.date+(isViewer()?'':'-'+S.me.storeId)+'.csv',out);
+}
+
 /* ================= Actions ================= */
 async function withBusy(btn,fn){
   if(S.busy)return;S.busy=true;var old=btn?btn.innerHTML:'';
@@ -1790,6 +2079,7 @@ async function reload(msg){
 }
 async function setDate(iso){
   if(!iso)return;S.date=iso;S.win=null;S.editLY=false;
+  if(S.page==='wl'){S.wlWin=null;S.wlEdit=false;renderPage();return}
   if(isViewer()){
     S.loading=true;renderDashboard();
     try{await loadData();S.loadError=null}catch(er){S.loadError=er.message}
@@ -1835,8 +2125,18 @@ document.addEventListener('click',function(e){
   else if(a==='density'){PREF.density=PREF.density==='compact'?'comfy':'compact';savePref();renderPage()}
   else if(a==='export-dash'){exportDash()}
   else if(a==='export-hist'){exportHist()}
-  else if(a==='clear-filters'){S.f={q:'',areas:[],status:'all'};renderDashboard()}
-  else if(a==='areas-clear'){S.f.areas=[];document.querySelectorAll('[data-area-f]').forEach(function(c){c.checked=false});renderDashBody()}
+  else if(a==='clear-filters'){S.f={q:'',areas:[],status:'all'};renderPage()}
+  else if(a==='areas-clear'){S.f.areas=[];document.querySelectorAll('[data-area-f]').forEach(function(c){c.checked=false});refreshFiltered()}
+  else if(a==='wl-retry'){loadWl().then(renderWl)}
+  else if(a==='wl-refresh'){loadWl().then(function(){renderWl();toast('Data refreshed','info')})}
+  else if(a==='wl-save-alloc'){saveWlAlloc(el)}
+  else if(a==='wl-edit-alloc'){S.wlEdit=true;renderWl();var fa=$('wa-0');if(fa)fa.focus()}
+  else if(a==='wl-cancel-alloc'){S.wlEdit=false;renderWl()}
+  else if(a==='wl-win'){S.wlWin=el.getAttribute('data-k');renderWl();var fq=$('wq-0');if(fq)fq.focus()}
+  else if(a==='wl-save-slot'){saveWlSlot(el)}
+  else if(a==='wl-tab'){S.wlTab=el.getAttribute('data-t');renderWlViewerBody()}
+  else if(a==='wl-sort'){nextSort(S.wlSort,el.getAttribute('data-k'));renderWlViewerBody()}
+  else if(a==='wl-export'){exportWl()}
   else if(a==='clear-hist'){S.histQ='';renderHistory()}
   else if(a==='clear-userq'){S.userQ='';renderUsers()}
 });
@@ -1848,7 +2148,7 @@ document.addEventListener('change',function(e){
     var area=t.value==='area';$('pickOne').hidden=area;$('pickMany').hidden=!area;
     document.querySelectorAll('.choice').forEach(function(c){c.classList.toggle('on',c.querySelector('input').checked)});
   }
-  else if(t.hasAttribute&&t.hasAttribute('data-area-f')){var v=t.getAttribute('data-area-f');S.f.areas=S.f.areas.filter(function(x){return x!==v});if(t.checked)S.f.areas.push(v);renderDashBody()}
+  else if(t.hasAttribute&&t.hasAttribute('data-area-f')){var v=t.getAttribute('data-area-f');S.f.areas=S.f.areas.filter(function(x){return x!==v});if(t.checked)S.f.areas.push(v);refreshFiltered()}
   else if(t.hasAttribute&&t.hasAttribute('data-col-win')){var k=t.getAttribute('data-col-win');PREF.wins=PREF.wins.filter(function(x){return x!==k});if(t.checked)PREF.wins.push(k);PREF.wins=WINS.map(function(w){return w.k}).filter(function(x){return PREF.wins.indexOf(x)>=0});savePref();rerenderTable()}
   else if(t.hasAttribute&&t.hasAttribute('data-col-met')){var m=t.getAttribute('data-col-met');PREF.metrics=PREF.metrics.filter(function(x){return x!==m});if(t.checked)PREF.metrics.push(m);PREF.metrics=METRICS.map(function(x){return x.k}).filter(function(x){return PREF.metrics.indexOf(x)>=0});savePref();rerenderTable()}
   else if(t.hasAttribute&&t.hasAttribute('data-col-group')){PREF.group=t.checked;savePref();rerenderTable()}
@@ -1864,6 +2164,8 @@ document.addEventListener('input',function(e){
   if(t.getAttribute('aria-invalid')==='true'&&t.value)setErr(t.id,'');
   if(t.id==='fSales'||t.id==='fTrx')updatePreview();
   else if(t.id==='dashQ'){S.f.q=t.value;clearTimeout(qTimer);qTimer=setTimeout(renderDashBody,160)}
+  else if(t.id==='wlQ'){S.f.q=t.value;clearTimeout(qTimer);qTimer=setTimeout(renderWlViewerBody,160)}
+  else if(t.id&&t.id.indexOf('wq-')===0)updateWlRow(+t.id.slice(3));
   else if(t.id==='histQ'){S.histQ=t.value;clearTimeout(qTimer);qTimer=setTimeout(renderHistTable,160)}
   else if(t.id==='userQ'){S.userQ=t.value;clearTimeout(qTimer);qTimer=setTimeout(renderUsersTable,160)}
   else if(t.id==='pickQ'){
@@ -1875,6 +2177,7 @@ document.addEventListener('keydown',function(e){
   if(e.key==='Escape'){closeMenus();setDrawer(false);return}
   if(e.key==='Enter'||e.key===' '){var row=e.target.closest&&e.target.closest('tr[data-act="pickDate"]');if(row&&e.target===row){e.preventDefault();row.click();return}}
   if(e.key!=='Enter')return;var id=e.target.id;
+  if(id&&/^w[aq]-\d+$/.test(id)){e.preventDefault();var nxt=$(id.slice(0,3)+(+id.slice(3)+1));if(nxt)nxt.focus();else{var sb=document.querySelector(id.charAt(1)==='a'?'[data-act=wl-save-alloc]':'[data-act=wl-save-slot]');if(sb)sb.click()}return}
   if(id==='fSales'){e.preventDefault();$('fTrx').focus()}
   else if(id==='fTrx'){e.preventDefault();var b=document.querySelector('[data-act=saveWin]');if(b)saveWin(b)}
   else if(id==='fLySales'){e.preventDefault();$('fLyTrx').focus()}
