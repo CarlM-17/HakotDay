@@ -41,6 +41,7 @@ const USER_HEADERS = ['Email', 'PasswordHash', 'Name', 'StoreID', 'StoreName', '
   'Status', 'ReviewedBy', 'ReviewedAt'];
 // Status: pending (new sign-up) -> approved | disabled. Only approved accounts can log in.
 const STATUSES = ['pending', 'approved', 'disabled'];
+const ALL_STORES = { id: 'ALL', name: 'All stores', area: '' };
 const LOG_HEADERS = ['Timestamp', 'Email', 'Name', 'HakotDate', 'StoreID', 'StoreName', 'Entry', 'Sales', 'TRX'];
 
 // ---------- HTTP helper ----------
@@ -285,7 +286,9 @@ function setSessionCookie(req, res, email) {
 
 function publicUser(u) {
   const role = ADMIN_EMAILS.includes(u.email) ? 'admin' : (u.role === 'admin' ? 'admin' : 'user');
-  return { email: u.email, name: u.name, storeId: u.storeId, storeName: u.storeName, area: u.area, role };
+  // allStores: sees and encodes every store (admins, and accounts signed up with "All stores").
+  const allStores = role === 'admin' || u.storeId === ALL_STORES.id;
+  return { email: u.email, name: u.name, storeId: u.storeId, storeName: u.storeName, area: u.area, role, allStores };
 }
 // ADMIN_EMAILS are always active so there is always someone who can approve.
 // A Role=admin row typed into the sheet counts as approved unless it is disabled.
@@ -334,7 +337,7 @@ app.post('/api/signup', wrap(async (req, res) => {
   if (!EMAIL_RE.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
   if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
   if (!name) return res.status(400).json({ error: 'Enter your name.' });
-  const store = (await loadStores()).find(s => s.id === storeId);
+  const store = storeId === ALL_STORES.id ? ALL_STORES : (await loadStores()).find(s => s.id === storeId);
   if (!store) return res.status(400).json({ error: 'Select your store.' });
   const users = await loadUsers();
   if (users.some(u => u.email === email)) return res.status(409).json({ error: 'This email is already registered. Please log in.' });
@@ -395,11 +398,11 @@ app.post('/api/users/status', requireUser, requireAdmin, wrap(async (req, res) =
   res.json({ ok: true, email, status });
 }));
 
-// User: every Hakot Day row of their own store. Admin: every store for the chosen date.
+// User: every Hakot Day row of their own store. Admin / All-stores: every store for the chosen date.
 app.get('/api/data', requireUser, wrap(async (req, res) => {
   const all = await loadData();
   let rows;
-  if (req.user.role === 'admin') {
+  if (req.user.allStores) {
     const date = idStr(req.query.date);
     rows = date ? all.filter(r => r.date === date) : all;
   } else {
@@ -412,9 +415,9 @@ app.post('/api/save', requireUser, wrap(async (req, res) => {
   const isAdmin = req.user.role === 'admin';
   const date = idStr(req.body.date);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Invalid date.' });
-  const storeId = isAdmin ? idStr(req.body.storeId || req.user.storeId) : req.user.storeId;
+  const storeId = req.user.allStores ? idStr(req.body.storeId) : req.user.storeId;
   const store = (await loadStores()).find(s => s.id === storeId);
-  if (!store) return res.status(400).json({ error: 'Store not found in ListOfStores.' });
+  if (!store) return res.status(400).json({ error: 'Select a store from ListOfStores.' });
 
   const all = await loadData();
   const existing = all.find(r => r.date === date && r.storeId === storeId);
@@ -648,6 +651,8 @@ function money(v){return v===''||v==null?'':Number(v).toLocaleString('en-PH',{mi
 function int(v){return v===''||v==null?'':Math.round(Number(v)).toLocaleString('en-PH')}
 function pct(x){return x==null?'':(x*100).toFixed(2)+'%'}
 function isAdmin(){return S.me&&S.me.role==='admin'}
+function allStores(){return S.me&&S.me.allStores}
+function defaultStore(){return allStores()?(S.stores[0]?S.stores[0].id:''):S.me.storeId}
 function fmtDate(iso){if(!iso)return '';var p=iso.split('-');var d=new Date(+p[0],+p[1]-1,+p[2]);return d.toLocaleDateString('en-US',{month:'long',day:'2-digit',year:'numeric'})}
 function storeById(id){for(var i=0;i<S.stores.length;i++){if(S.stores[i].id===String(id))return S.stores[i]}return null}
 function winLabel(k){for(var i=0;i<WINS.length;i++){if(WINS[i].k===k)return WINS[i].l}return k}
@@ -678,10 +683,10 @@ function upsert(rec){
 // ---------- Rendering ----------
 function render(){if(!S.me)renderAuth();else renderMain()}
 
-function storeOptions(sel){
+function storeOptions(sel,withAll){
   var areas=[],by={};
   S.stores.forEach(function(s){if(!by[s.area]){by[s.area]=[];areas.push(s.area)}by[s.area].push(s)});
-  return areas.map(function(a){return '<optgroup label="'+esc(a)+'">'+by[a].map(function(s){return '<option value="'+esc(s.id)+'"'+(String(sel)===s.id?' selected':'')+'>'+esc(s.id+' · '+s.name)+'</option>'}).join('')+'</optgroup>'}).join('');
+  return (withAll?'<option value="ALL"'+(sel==='ALL'?' selected':'')+'>All stores</option>':'')+areas.map(function(a){return '<optgroup label="'+esc(a)+'">'+by[a].map(function(s){return '<option value="'+esc(s.id)+'"'+(String(sel)===s.id?' selected':'')+'>'+esc(s.id+' · '+s.name)+'</option>'}).join('')+'</optgroup>'}).join('');
 }
 
 function renderAuth(){
@@ -692,7 +697,7 @@ function renderAuth(){
   if(login){
     h+='<form data-form="login"><label>Email<input name="email" type="email" autocomplete="email" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button class="btn primary" type="submit">Log in</button></form>';
   }else{
-    h+='<form data-form="signup"><label>Full name<input name="name" autocomplete="name" required></label><label>Email<input name="email" type="email" autocomplete="email" required></label><label>Password<input name="password" type="password" minlength="6" autocomplete="new-password" required></label><label>Your store<select name="storeId" required><option value="">Select store…</option>'+storeOptions('')+'</select></label><button class="btn primary" type="submit">Create account</button></form><p class="hint">New accounts need admin approval before you can log in.</p>';
+    h+='<form data-form="signup"><label>Full name<input name="name" autocomplete="name" required></label><label>Email<input name="email" type="email" autocomplete="email" required></label><label>Password<input name="password" type="password" minlength="6" autocomplete="new-password" required></label><label>Your store<select name="storeId" required><option value="">Select store…</option>'+storeOptions('',true)+'</select></label><button class="btn primary" type="submit">Create account</button></form><p class="hint">New accounts need admin approval before you can log in.</p>';
     if(!S.stores.length)h+='<p class="hint bad">Store list could not be loaded'+(S.storesError?': '+esc(S.storesError):'.')+'</p>';
   }
   h+='</div></div>';
@@ -700,7 +705,7 @@ function renderAuth(){
 }
 
 function renderMain(){
-  var sub=isAdmin()?'Admin · all stores':esc(S.me.storeId+' · '+S.me.storeName);
+  var sub=isAdmin()?'Admin · all stores':(allStores()?'All stores':esc(S.me.storeId+' · '+S.me.storeName));
   var h='<header class="bar"><div class="logo">'+ICON+'</div><div><h1>Hakot Day Sales</h1><small>'+sub+'</small></div><div class="sp"></div><div class="who">'+esc(S.me.name)+'<br>'+esc(S.me.email)+'</div><button class="btn sm onbar" data-act="logout">Log out</button></header>';
   if(isAdmin()){
     var pend=pendingCount();
@@ -774,7 +779,7 @@ function renderEntry(){
 
   var h='<div class="row between"><h2>Encode sales</h2><span class="muted sm">'+esc(fmtDate(S.date))+'</span></div>';
   h+='<div class="grid2"><label>Hakot Day date<input type="date" id="fDate" value="'+esc(S.date)+'"></label>';
-  if(isAdmin())h+='<label>Store<select id="fStore">'+storeOptions(S.store)+'</select></label>';
+  if(allStores())h+='<label>Store<select id="fStore">'+storeOptions(S.store)+'</select></label>';
   else h+='<label>Store<input disabled value="'+esc(st?st.id+' · '+st.name:S.me.storeId+' · '+S.me.storeName)+'"></label>';
   h+='</div>';
 
@@ -856,7 +861,7 @@ function thead(first){
 
 function renderTable(){
   var h;
-  if(isAdmin()){
+  if(allStores()){
     var byId={};S.rows.forEach(function(r){if(r.date===S.date)byId[r.storeId]=r});
     var areas=[],by={};
     S.stores.forEach(function(s){if(!by[s.area]){by[s.area]=[];areas.push(s.area)}by[s.area].push(s)});
@@ -955,7 +960,7 @@ document.addEventListener('change',async function(e){
   var id=e.target.id;
   if(id==='fDate'&&e.target.value){
     S.date=e.target.value;S.win=null;S.editLY=false;
-    if(isAdmin()){try{await loadData()}catch(er){toast(er.message,true)}}
+    if(allStores()){try{await loadData()}catch(er){toast(er.message,true)}}
     renderEntry();renderTable();
   }else if(id==='fStore'){S.store=e.target.value;S.win=null;S.editLY=false;renderEntry();renderTable()}
 });
@@ -981,7 +986,7 @@ document.addEventListener('submit',async function(e){
       S.authNote={kind:'ok',title:'Account submitted',text:'Thanks, '+data.name+'. An admin needs to approve your account before you can log in.'};
       renderAuth();return;
     }
-    S.me=j.user;S.store=S.me.storeId;S.date=todayPH();S.win=null;S.authNote=null;S.view='sales';
+    S.me=j.user;S.store=defaultStore();S.date=todayPH();S.win=null;S.authNote=null;S.view='sales';
     await loadData();
     if(isAdmin()){try{await loadUsers()}catch(e2){}}
     render();toast('Welcome, '+S.me.name);
@@ -997,7 +1002,7 @@ document.addEventListener('submit',async function(e){
   try{S.me=(await api('/api/me')).user}
   catch(e){S.me=null;if(e.status===401&&e.message!=='Please log in.')S.authNote={kind:'warn',title:'Signed out',text:e.message}}
   if(S.me){
-    S.store=S.me.storeId;try{await loadData()}catch(e){toast(e.message,true)}
+    S.store=defaultStore();try{await loadData()}catch(e){toast(e.message,true)}
     if(isAdmin()){try{await loadUsers()}catch(e){}}
   }
   render();
