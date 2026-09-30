@@ -465,11 +465,18 @@ app.get('/api/data', requireUser, wrap(async (req, res) => {
 
 // ---------- Wines & Liquor ----------
 async function loadWlItems() {
-  let rows;
-  try { rows = await getValues("'" + WL_ITEMS_SHEET + "'!B3:B"); }
-  catch (e) { throw new Error('The ' + WL_ITEMS_SHEET + ' tab was not found. Add it with the item list in column B.'); }
+  let grid;
+  try { grid = await getValues("'" + WL_ITEMS_SHEET + "'!A1:Z"); }
+  catch (e) { throw new Error('The ' + WL_ITEMS_SHEET + ' tab was not found. Add it with a "Description" header and the items below it.'); }
+  // Items sit under the "Description" header wherever it is (column A today); fallback: first non-empty column.
+  let hr = -1, hc = -1;
+  for (let r = 0; r < Math.min(grid.length, 10) && hr < 0; r++) {
+    const c = (grid[r] || []).findIndex(v => idStr(v).toLowerCase() === 'description');
+    if (c >= 0) { hr = r; hc = c; }
+  }
+  if (hc < 0) { hr = -1; hc = 0; while (hc < 26 && !grid.some(row => idStr((row || [])[hc]))) hc++; }
   const seen = new Set();
-  return rows.map(r => idStr(r[0]))
+  return grid.slice(hr + 1).map(r => idStr((r || [])[hc]))
     .filter(n => n && n.toLowerCase() !== 'description' && !seen.has(n) && seen.add(n));
 }
 async function loadWlRows() {
@@ -1900,7 +1907,7 @@ function stCell(sold,alloc){if(!(alloc>0))return '<span class="muted">—</span>
 function wlStateBlock(){
   if(S.wl.loading||S.wl.date!==S.date)return skelKpis(3)+skelTable(8);
   if(S.wl.error)return '<div class="card">'+stateBlock('alert','Unable to load Wines & Liquor',esc(S.wl.error),'<button class="btn btn-primary" data-act="wl-retry">'+icon('refresh')+'Try again</button>')+'</div>';
-  if(!S.wl.items.length)return '<div class="card">'+stateBlock('wine','No items listed yet','Add the product descriptions in column B of the Wines&Liquor tab (from row 3), then refresh.','<button class="btn" data-act="wl-retry">'+icon('refresh')+'Refresh</button>')+'</div>';
+  if(!S.wl.items.length)return '<div class="card">'+stateBlock('wine','No items listed yet','Add the product descriptions under the Description header in the Wines&Liquor tab, then refresh.','<button class="btn" data-act="wl-retry">'+icon('refresh')+'Refresh</button>')+'</div>';
   return '';
 }
 function wlMine(){var m={};S.wl.rows.forEach(function(r){if(r.storeId===String(S.me.storeId))m[r.item]=r});return m}
