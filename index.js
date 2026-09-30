@@ -1476,7 +1476,8 @@ function drawInc(box,pts){
   WINS.forEach(function(w,i){s+='<text x="'+cx(i)+'" y="'+(H-8)+'" text-anchor="middle" font-size="11" fill="var(--text-3)">'+SHORT[w.k]+'</text>'});
   pts.forEach(function(p){if(Math.abs(y(0)-y(p.sales))<0.5)return;s+='<path d="'+roundedBar(cx(p.i)-bw/2,y(0),y(p.sales),bw)+'" fill="var(--series)"/>'});
   var peak=pts.reduce(function(m,x){return x.sales>m.sales?x:m},pts[0]);
-  if(peak.sales>0)s+='<text x="'+cx(peak.i)+'" y="'+(y(peak.sales)-6)+'" text-anchor="middle" font-size="12" font-weight="700" fill="var(--text)">'+compact(peak.sales)+'</text>';
+  // Value label on every bar (above the cap; below for a negative correction); peak stays bold.
+  pts.forEach(function(p){var isPeak=p===peak,neg=p.sales<0;s+='<text x="'+cx(p.i)+'" y="'+(neg?y(p.sales)+14:y(p.sales)-6)+'" text-anchor="middle" font-size="'+(isPeak?12:11.5)+'" font-weight="'+(isPeak?700:600)+'" fill="'+(isPeak?'var(--text)':'var(--text-2)')+'">'+compact(p.sales)+'</text>'});
   WINS.forEach(function(w,i){s+='<rect data-hit="'+i+'" x="'+(L+band*i)+'" y="'+T+'" width="'+band+'" height="'+ph+'" fill="transparent"/>'});
   plot.innerHTML=s+'</svg>';
   var byI={},total=pts[pts.length-1].cum;pts.forEach(function(p){byI[p.i]=p});
