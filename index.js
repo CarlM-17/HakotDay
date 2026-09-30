@@ -412,10 +412,13 @@ app.get('/api/data', requireUser, wrap(async (req, res) => {
 }));
 
 app.post('/api/save', requireUser, wrap(async (req, res) => {
-  const isAdmin = req.user.role === 'admin';
+  // Admin / area-manager (all-stores) accounts are view-only; only store accounts encode.
+  if (req.user.allStores) {
+    return res.status(403).json({ error: 'Admin and area manager accounts are view-only. Only store accounts can encode.' });
+  }
   const date = idStr(req.body.date);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Invalid date.' });
-  const storeId = req.user.allStores ? idStr(req.body.storeId) : req.user.storeId;
+  const storeId = req.user.storeId;
   const store = (await loadStores()).find(s => s.id === storeId);
   if (!store) return res.status(400).json({ error: 'Select a store from ListOfStores.' });
 
@@ -426,16 +429,12 @@ app.post('/api/save', requireUser, wrap(async (req, res) => {
   };
   rec.area = store.area;
   rec.storeName = store.name;
-  const hasWindow = WINDOWS.some(w => rec.w[w.key].sales !== '');
   let logEntry;
 
   if (req.body.ly) {
     const sales = num(req.body.ly.sales), trx = num(req.body.ly.trx);
     if (sales === '' || sales < 0 || trx === '' || trx < 0) {
       return res.status(400).json({ error: 'Enter Sales Last Year and TRX Count LY (use 0 for new stores).' });
-    }
-    if (!isAdmin && hasWindow && rec.ly !== '') {
-      return res.status(403).json({ error: 'Last Year figures are locked once a time window is saved. Ask an admin to change them.' });
     }
     rec.ly = sales; rec.trxLy = Math.round(trx);
     logEntry = ['LY', sales, Math.round(trx)];
@@ -705,7 +704,7 @@ function renderAuth(){
 }
 
 function renderMain(){
-  var sub=isAdmin()?'Admin · all stores':(allStores()?'All stores':esc(S.me.storeId+' · '+S.me.storeName));
+  var sub=isAdmin()?'Admin · view only':(allStores()?'Area manager · view only':esc(S.me.storeId+' · '+S.me.storeName));
   var h='<header class="bar"><div class="logo">'+ICON+'</div><div><h1>Hakot Day Sales</h1><small>'+sub+'</small></div><div class="sp"></div><div class="who">'+esc(S.me.name)+'<br>'+esc(S.me.email)+'</div><button class="btn sm onbar" data-act="logout">Log out</button></header>';
   if(isAdmin()){
     var pend=pendingCount();
@@ -767,20 +766,44 @@ async function setStatus(btn){
   finally{S.busy=false}
 }
 
+function shiftDate(iso,days){var p=iso.split('-');var d=new Date(Date.UTC(+p[0],+p[1]-1,+p[2]+days));return d.toISOString().slice(0,10)}
+
+// Admin / area manager: view-only. Date picker + summary; the table below does the rest.
+function renderViewer(){
+  var byId={};S.rows.forEach(function(r){if(r.date===S.date)byId[r.storeId]=r});
+  var recs=S.stores.map(function(s){return byId[s.id]}).filter(Boolean);
+  // Sales so far = each store's most recent window (running totals), vs LY of those same stores.
+  var soFar=0,soFarLy=0,reporting=0;
+  recs.forEach(function(r){
+    var last=null;WINS.forEach(function(w){if(r.w[w.k].sales!=='')last=r.w[w.k]});
+    if(last){reporting++;soFar+=last.sales;if(r.ly>0)soFarLy+=r.ly}
+  });
+  var vs=soFarLy>0?soFar/soFarLy:null;
+  var finals=recs.filter(function(r){return r.w.FINAL.sales!==''}).length;
+  var h='<div class="row between"><h2>Hakot Day summary</h2><span class="badge warn">View only</span></div>';
+  h+='<div class="grid2"><label>Hakot Day date<input type="date" id="fDate" value="'+esc(S.date)+'"></label>';
+  h+='<div class="row" style="align-items:flex-end;gap:6px"><button class="btn ghost sm" data-act="day" data-n="-1">‹ Prev day</button><button class="btn ghost sm" data-act="day" data-n="0">Today</button><button class="btn ghost sm" data-act="day" data-n="1">Next day ›</button></div></div>';
+  h+='<div class="preview">';
+  h+='<div class="pv"><small>Stores started</small><b>'+recs.length+' / '+S.stores.length+'</b></div>';
+  h+='<div class="pv"><small>With final sales</small><b>'+finals+' / '+S.stores.length+'</b></div>';
+  h+='<div class="pv"><small>Sales so far ('+reporting+' stores, latest entry)</small><b>'+(reporting?money(soFar):'—')+'</b></div>';
+  h+='<div class="pv"><small>VS LY so far</small><b class="'+(vs!=null&&vs>=1?'good':'')+'">'+(vs==null?'—':pct(vs))+'</b></div>';
+  h+='</div>';
+  $('entry').innerHTML=h;
+}
+
 function renderEntry(){
+  if(allStores()){renderViewer();return}
   var st=storeById(S.store);
   var rec=currentRec();
   var lySet=!!rec&&rec.ly!=='';
-  var hasWin=!!rec&&WINS.some(function(w){return rec.w[w.k].sales!==''});
-  var canEditLY=isAdmin()||!hasWin;
   var nx=nextWin(rec);
   if(!S.win)S.win=nx||'FINAL';
   var dis=lySet?'':' disabled';
 
   var h='<div class="row between"><h2>Encode sales</h2><span class="muted sm">'+esc(fmtDate(S.date))+'</span></div>';
   h+='<div class="grid2"><label>Hakot Day date<input type="date" id="fDate" value="'+esc(S.date)+'"></label>';
-  if(allStores())h+='<label>Store<select id="fStore">'+storeOptions(S.store)+'</select></label>';
-  else h+='<label>Store<input disabled value="'+esc(st?st.id+' · '+st.name:S.me.storeId+' · '+S.me.storeName)+'"></label>';
+  h+='<label>Store<input disabled value="'+esc(st?st.id+' · '+st.name:S.me.storeId+' · '+S.me.storeName)+'"></label>';
   h+='</div>';
 
   // Step 1: Last Year
@@ -790,7 +813,7 @@ function renderEntry(){
     h+='<div class="grid2"><label>Sales Last Year<input id="fLySales" inputmode="decimal" autocomplete="off" value="'+esc(lySet?rec.ly:'')+'"></label><label>TRX Count LY<input id="fLyTrx" inputmode="numeric" autocomplete="off" value="'+esc(lySet?rec.trxLy:'')+'"></label></div>';
     h+='<div class="actions"><button class="btn primary" data-act="saveLY">Save Last Year</button>'+(S.editLY?'<button class="btn ghost" data-act="cancelLY">Cancel</button>':'')+'</div>';
   }else{
-    h+='<div class="lyshow"><div><small>Sales Last Year</small><b>'+money(rec.ly)+'</b></div><div><small>TRX Count LY</small><b>'+int(rec.trxLy)+'</b></div><div class="sp" style="flex:1"></div>'+(canEditLY?'<button class="btn ghost sm" data-act="editLY">Edit</button>':'<span class="muted sm">Locked · ask admin to change</span>')+'</div>';
+    h+='<div class="lyshow"><div><small>Sales Last Year</small><b>'+money(rec.ly)+'</b></div><div><small>TRX Count LY</small><b>'+int(rec.trxLy)+'</b></div><div class="sp" style="flex:1"></div><button class="btn ghost sm" data-act="editLY">Edit</button></div>';
   }
   h+='</div>';
 
@@ -877,7 +900,7 @@ function renderTable(){
       h+='<tr class="area"><td colspan="'+(4+WINS.length*4)+'">'+esc(a)+'</td></tr>';
       by[a].forEach(function(s){
         var r=byId[s.id]||blankRec(s);if(byId[s.id])recs.push(r);
-        h+='<tr class="clickable'+(String(S.store)===s.id?' cur':'')+'" data-act="pick" data-id="'+esc(s.id)+'"><td class="l">'+esc(s.id)+'</td><td class="l stick">'+esc(s.name)+(s.remarks&&s.remarks.toLowerCase()==='new'?' <span class="badge">New</span>':'')+'</td><td>'+money(r.ly)+'</td><td>'+int(r.trxLy)+'</td>'+recCells(r)+'</tr>';
+        h+='<tr><td class="l">'+esc(s.id)+'</td><td class="l stick">'+esc(s.name)+(s.remarks&&s.remarks.toLowerCase()==='new'?' <span class="badge">New</span>':'')+'</td><td>'+money(r.ly)+'</td><td>'+int(r.trxLy)+'</td>'+recCells(r)+'</tr>';
       });
       var ag=agg(recs);allRecs=allRecs.concat(recs);
       h+='<tr class="sub"><td class="l"></td><td class="l stick">Sub total</td><td>'+money(ag.ly)+'</td><td>'+int(ag.trxLy)+'</td>'+aggCells(ag)+'</tr>';
@@ -952,17 +975,18 @@ document.addEventListener('click',function(e){
   else if(a==='view'){S.view=el.getAttribute('data-v');renderMain();if(S.view==='users')loadUsers().then(renderMain).catch(function(er){toast(er.message,true)})}
   else if(a==='refreshUsers'){loadUsers().then(function(){renderMain();toast('Updated')}).catch(function(er){toast(er.message,true)})}
   else if(a==='setStatus'){setStatus(el)}
-  else if(a==='pick'){S.store=el.getAttribute('data-id');S.win=null;S.editLY=false;renderEntry();renderTable();window.scrollTo({top:0,behavior:'smooth'})}
+  else if(a==='day'){var n=+el.getAttribute('data-n');setDate(n===0?todayPH():shiftDate(S.date,n))}
   else if(a==='pickDate'){S.date=el.getAttribute('data-d');S.win=null;S.editLY=false;renderEntry();renderTable();window.scrollTo({top:0,behavior:'smooth'})}
 });
 
-document.addEventListener('change',async function(e){
-  var id=e.target.id;
-  if(id==='fDate'&&e.target.value){
-    S.date=e.target.value;S.win=null;S.editLY=false;
-    if(allStores()){try{await loadData()}catch(er){toast(er.message,true)}}
-    renderEntry();renderTable();
-  }else if(id==='fStore'){S.store=e.target.value;S.win=null;S.editLY=false;renderEntry();renderTable()}
+async function setDate(iso){
+  S.date=iso;S.win=null;S.editLY=false;
+  if(allStores()){try{await loadData()}catch(er){toast(er.message,true)}}
+  renderEntry();renderTable();
+}
+
+document.addEventListener('change',function(e){
+  if(e.target.id==='fDate'&&e.target.value)setDate(e.target.value);
 });
 
 document.addEventListener('input',function(e){if(e.target.id==='fSales'||e.target.id==='fTrx')updatePreview()});
