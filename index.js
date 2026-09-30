@@ -9,7 +9,9 @@ const crypto = require('crypto');
 // ---------- Config ----------
 const SHEET_ID = process.env.GOOGLE_SHEET_ID || '1bB3g3TlDbRYX5QY1AQkENU5Zq1o8xiaN1JMJdGNhVfY';
 const CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL || '';
-const PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
+// Tolerates the key pasted with its JSON quotes and/or literal \n sequences.
+const PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || '').trim()
+  .replace(/^["']|["'],?$/g, '').replace(/\\n/g, '\n');
 const SESSION_SECRET = process.env.SESSION_SECRET || 'hakot-day-dev-secret-change-me';
 const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || '')
   .toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
@@ -691,7 +693,7 @@ function renderAuth(){
     h+='<form data-form="login"><label>Email<input name="email" type="email" autocomplete="email" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button class="btn primary" type="submit">Log in</button></form>';
   }else{
     h+='<form data-form="signup"><label>Full name<input name="name" autocomplete="name" required></label><label>Email<input name="email" type="email" autocomplete="email" required></label><label>Password<input name="password" type="password" minlength="6" autocomplete="new-password" required></label><label>Your store<select name="storeId" required><option value="">Select store…</option>'+storeOptions('')+'</select></label><button class="btn primary" type="submit">Create account</button></form><p class="hint">New accounts need admin approval before you can log in.</p>';
-    if(!S.stores.length)h+='<p class="hint bad">Store list could not be loaded. Check the server connection.</p>';
+    if(!S.stores.length)h+='<p class="hint bad">Store list could not be loaded'+(S.storesError?': '+esc(S.storesError):'.')+'</p>';
   }
   h+='</div></div>';
   $('app').innerHTML=h;
@@ -991,7 +993,7 @@ document.addEventListener('submit',async function(e){
 
 (async function boot(){
   if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').catch(function(){})}
-  try{S.stores=(await api('/api/stores')).stores||[]}catch(e){toast('Could not load store list: '+e.message,true)}
+  try{S.stores=(await api('/api/stores')).stores||[]}catch(e){S.storesError=e.message}
   try{S.me=(await api('/api/me')).user}
   catch(e){S.me=null;if(e.status===401&&e.message!=='Please log in.')S.authNote={kind:'warn',title:'Signed out',text:e.message}}
   if(S.me){
