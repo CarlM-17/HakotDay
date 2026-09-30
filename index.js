@@ -42,6 +42,8 @@ const USER_HEADERS = ['Email', 'PasswordHash', 'Name', 'StoreID', 'StoreName', '
 // Status: pending (new sign-up) -> approved | disabled. Only approved accounts can log in.
 const STATUSES = ['pending', 'approved', 'disabled'];
 const ALL_STORES = { id: 'ALL', name: 'All stores', area: '' };
+// Users!G Role: 'user' (store account, encodes one store), 'areamanager' (views chosen stores), 'admin'.
+const ROLE_LABELS = { user: 'Store', areamanager: 'Area manager', admin: 'Admin' };
 const LOG_HEADERS = ['Timestamp', 'Email', 'Name', 'HakotDate', 'StoreID', 'StoreName', 'Entry', 'Sales', 'TRX'];
 
 // ---------- HTTP helper ----------
@@ -285,10 +287,17 @@ function setSessionCookie(req, res, email) {
 }
 
 function publicUser(u) {
-  const role = ADMIN_EMAILS.includes(u.email) ? 'admin' : (u.role === 'admin' ? 'admin' : 'user');
-  // allStores: sees and encodes every store (admins, and accounts signed up with "All stores").
-  const allStores = role === 'admin' || u.storeId === ALL_STORES.id;
-  return { email: u.email, name: u.name, storeId: u.storeId, storeName: u.storeName, area: u.area, role, allStores };
+  // Users!D StoreID holds one ID for store accounts, or "ALL" / "105, 138, …" for area managers.
+  const ids = idStr(u.storeId).split(',').map(x => x.trim()).filter(Boolean);
+  const role = (ADMIN_EMAILS.includes(u.email) || u.role === 'admin') ? 'admin'
+    : (u.role === 'areamanager' || ids.includes(ALL_STORES.id) || ids.length > 1) ? 'areamanager' : 'user';
+  const viewer = role !== 'user'; // admins and area managers only view; store accounts encode
+  // scope: store IDs this account may see; null = every store.
+  const scope = role === 'admin' || ids.includes(ALL_STORES.id) ? null : (viewer ? ids : ids.slice(0, 1));
+  return {
+    email: u.email, name: u.name, storeId: u.storeId, storeName: u.storeName, area: u.area,
+    role, roleLabel: ROLE_LABELS[role], viewer, scope,
+  };
 }
 // ADMIN_EMAILS are always active so there is always someone who can approve.
 // A Role=admin row typed into the sheet counts as approved unless it is disabled.
@@ -333,23 +342,43 @@ app.post('/api/signup', wrap(async (req, res) => {
   const email = idStr(req.body.email).toLowerCase();
   const password = String(req.body.password || '');
   const name = idStr(req.body.name);
-  const storeId = idStr(req.body.storeId);
+  const isArea = req.body.position === 'area';
   if (!EMAIL_RE.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
   if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
   if (!name) return res.status(400).json({ error: 'Enter your name.' });
-  const store = storeId === ALL_STORES.id ? ALL_STORES : (await loadStores()).find(s => s.id === storeId);
-  if (!store) return res.status(400).json({ error: 'Select your store.' });
+  const stores = await loadStores();
+  let store;
+  if (isArea) {
+    // Area manager: "ALL" or a list of store IDs.
+    const raw = req.body.storeIds;
+    const ids = raw === ALL_STORES.id ? [] : (Array.isArray(raw) ? raw : []).map(idStr);
+    const picked = stores.filter(s => ids.includes(s.id));
+    if (raw !== ALL_STORES.id && !picked.length) return res.status(400).json({ error: 'Select the stores you manage.' });
+    if (raw === ALL_STORES.id || picked.length === stores.length) {
+      store = ALL_STORES;
+    } else {
+      store = {
+        id: "'" + picked.map(s => s.id).join(', '), // leading ' keeps Sheets from reading it as a number
+        name: picked.map(s => s.name).join(', '),
+        area: Array.from(new Set(picked.map(s => s.area))).join(', '),
+      };
+    }
+  } else {
+    store = stores.find(s => s.id === idStr(req.body.storeId));
+    if (!store) return res.status(400).json({ error: 'Select your store.' });
+  }
+  const role = isArea ? 'areamanager' : 'user';
   const users = await loadUsers();
   if (users.some(u => u.email === email)) return res.status(409).json({ error: 'This email is already registered. Please log in.' });
   const autoApproved = ADMIN_EMAILS.includes(email);
   await appendValues(USERS_SHEET + '!A:K', [[
     safeText(email), hashPassword(password), safeText(name), Number(store.id) || store.id,
-    safeText(store.name), safeText(store.area), 'user', nowPH(),
+    safeText(store.name), safeText(store.area), role, nowPH(),
     autoApproved ? 'approved' : 'pending', autoApproved ? 'ADMIN_EMAILS' : '', autoApproved ? nowPH() : '',
   ]]);
   if (!autoApproved) return res.json({ pending: true });
   setSessionCookie(req, res, email);
-  res.json({ user: publicUser({ email, name, storeId: store.id, storeName: store.name, area: store.area, role: 'user' }) });
+  res.json({ user: publicUser({ email, name, storeId: store.id.replace(/^'/, ''), storeName: store.name, area: store.area, role }) });
 }));
 
 app.post('/api/login', wrap(async (req, res) => {
@@ -398,22 +427,21 @@ app.post('/api/users/status', requireUser, requireAdmin, wrap(async (req, res) =
   res.json({ ok: true, email, status });
 }));
 
-// User: every Hakot Day row of their own store. Admin / All-stores: every store for the chosen date.
+// Store account: every Hakot Day row of its store. Admin / area manager: their stores for the chosen date.
 app.get('/api/data', requireUser, wrap(async (req, res) => {
   const all = await loadData();
-  let rows;
-  if (req.user.allStores) {
+  const scope = req.user.scope;
+  let rows = scope ? all.filter(r => scope.includes(r.storeId)) : all;
+  if (req.user.viewer) {
     const date = idStr(req.query.date);
-    rows = date ? all.filter(r => r.date === date) : all;
-  } else {
-    rows = all.filter(r => r.storeId === req.user.storeId);
+    if (date) rows = rows.filter(r => r.date === date);
   }
   res.json({ rows: rows.map(publicRec) });
 }));
 
 app.post('/api/save', requireUser, wrap(async (req, res) => {
-  // Admin / area-manager (all-stores) accounts are view-only; only store accounts encode.
-  if (req.user.allStores) {
+  // Admin / area-manager accounts are view-only; only store accounts encode.
+  if (req.user.viewer) {
     return res.status(403).json({ error: 'Admin and area manager accounts are view-only. Only store accounts can encode.' });
   }
   const date = idStr(req.body.date);
@@ -442,7 +470,6 @@ app.post('/api/save', requireUser, wrap(async (req, res) => {
     const key = idStr(req.body.window.key);
     const w = WINDOWS.find(x => x.key === key);
     if (!w) return res.status(400).json({ error: 'Unknown time window.' });
-    if (rec.ly === '') return res.status(400).json({ error: 'Enter the Last Year figures first.' });
     const sales = num(req.body.window.sales), trx = num(req.body.window.trx);
     if (sales === '' || sales < 0) return res.status(400).json({ error: 'Enter a valid Sales amount.' });
     if (trx === '' || trx < 0) return res.status(400).json({ error: 'Enter a valid TRX count.' });
@@ -631,6 +658,20 @@ h3.sec{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--
 .st.approved{color:var(--good);background:var(--brand-soft);border-color:transparent}
 .st.pending{color:var(--warn)}
 .st.disabled{color:var(--bad)}
+td.wrap{white-space:normal;min-width:220px;max-width:360px}
+.pos{display:grid;gap:6px}
+.pos-l{font-size:12.5px;color:var(--muted);font-weight:600}
+.radio{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;border:1px solid var(--line);border-radius:10px;padding:9px 12px;color:var(--ink);font-size:14px;font-weight:600;cursor:pointer}
+.radio input,.chk input{width:auto;margin:0;accent-color:var(--brand)}
+.radio small{flex-basis:100%;padding-left:24px;color:var(--muted);font-weight:500;font-size:12px}
+.radio:has(input:checked){border-color:var(--brand);background:var(--brand-soft)}
+.picker{border:1px solid var(--line);border-radius:10px;max-height:320px;overflow:auto}
+.picker[hidden],label[hidden]{display:none}
+.pick-head{position:sticky;top:0;z-index:1;display:flex;justify-content:space-between;padding:8px 12px;background:var(--shade);border-bottom:1px solid var(--line);font-size:12.5px;font-weight:700;color:var(--muted)}
+.chk{display:flex;align-items:center;gap:8px;padding:7px 12px;color:var(--ink);font-size:14px;font-weight:500;cursor:pointer}
+.chk.all{font-weight:700;border-bottom:1px solid var(--line)}
+.chk.area{font-weight:700;background:var(--area)}
+.chk.st1{padding-left:32px}
 @media (max-width:600px){ .bar .who{display:none} main{padding:12px} .card{padding:14px} }
 </style>
 </head>
@@ -650,8 +691,14 @@ function money(v){return v===''||v==null?'':Number(v).toLocaleString('en-PH',{mi
 function int(v){return v===''||v==null?'':Math.round(Number(v)).toLocaleString('en-PH')}
 function pct(x){return x==null?'':(x*100).toFixed(2)+'%'}
 function isAdmin(){return S.me&&S.me.role==='admin'}
-function allStores(){return S.me&&S.me.allStores}
-function defaultStore(){return allStores()?(S.stores[0]?S.stores[0].id:''):S.me.storeId}
+function isViewer(){return S.me&&S.me.viewer}
+function myStores(){var sc=S.me&&S.me.scope;return sc?S.stores.filter(function(s){return sc.indexOf(s.id)>=0}):S.stores}
+function defaultStore(){return isViewer()?'':S.me.storeId}
+function storeLabel(u){
+  if(u.role==='user')return u.storeId+' · '+u.storeName;
+  if(u.role==='admin')return 'All stores';
+  return u.scope?(u.scope.length+' store'+(u.scope.length===1?'':'s')+': '+u.storeName):'All stores';
+}
 function fmtDate(iso){if(!iso)return '';var p=iso.split('-');var d=new Date(+p[0],+p[1]-1,+p[2]);return d.toLocaleDateString('en-US',{month:'long',day:'2-digit',year:'numeric'})}
 function storeById(id){for(var i=0;i<S.stores.length;i++){if(S.stores[i].id===String(id))return S.stores[i]}return null}
 function winLabel(k){for(var i=0;i<WINS.length;i++){if(WINS[i].k===k)return WINS[i].l}return k}
@@ -682,10 +729,35 @@ function upsert(rec){
 // ---------- Rendering ----------
 function render(){if(!S.me)renderAuth();else renderMain()}
 
-function storeOptions(sel,withAll){
+function storeOptions(sel){
   var areas=[],by={};
   S.stores.forEach(function(s){if(!by[s.area]){by[s.area]=[];areas.push(s.area)}by[s.area].push(s)});
-  return (withAll?'<option value="ALL"'+(sel==='ALL'?' selected':'')+'>All stores</option>':'')+areas.map(function(a){return '<optgroup label="'+esc(a)+'">'+by[a].map(function(s){return '<option value="'+esc(s.id)+'"'+(String(sel)===s.id?' selected':'')+'>'+esc(s.id+' · '+s.name)+'</option>'}).join('')+'</optgroup>'}).join('');
+  return areas.map(function(a){return '<optgroup label="'+esc(a)+'">'+by[a].map(function(s){return '<option value="'+esc(s.id)+'"'+(String(sel)===s.id?' selected':'')+'>'+esc(s.id+' · '+s.name)+'</option>'}).join('')+'</optgroup>'}).join('');
+}
+
+function storePicker(){
+  var areas=[],by={};
+  S.stores.forEach(function(s){if(!by[s.area]){by[s.area]=[];areas.push(s.area)}by[s.area].push(s)});
+  var h='<div id="pickMany" class="picker" hidden><div class="pick-head"><span>Stores you manage</span><span class="muted" id="pickCount">0 selected</span></div>';
+  h+='<label class="chk all"><input type="checkbox" data-pick="all"> All stores</label>';
+  areas.forEach(function(a){
+    h+='<div class="pgroup"><label class="chk area"><input type="checkbox" data-pick="area" data-area="'+esc(a)+'"> '+esc(a)+' <span class="muted">('+by[a].length+')</span></label>';
+    by[a].forEach(function(s){h+='<label class="chk st1"><input type="checkbox" data-pick="store" data-area="'+esc(a)+'" value="'+esc(s.id)+'"> '+esc(s.id+' · '+s.name)+'</label>'});
+    h+='</div>';
+  });
+  return h+'</div>';
+}
+function syncPicker(){
+  var box=$('pickMany');if(!box)return;
+  var all=box.querySelectorAll('[data-pick=store]'),n=0;
+  all.forEach(function(c){if(c.checked)n++});
+  box.querySelectorAll('[data-pick=area]').forEach(function(a){
+    var cs=box.querySelectorAll('[data-pick=store][data-area="'+CSS.escape(a.getAttribute('data-area'))+'"]'),k=0;
+    cs.forEach(function(c){if(c.checked)k++});
+    a.checked=k===cs.length&&k>0;a.indeterminate=k>0&&k<cs.length;
+  });
+  var top=box.querySelector('[data-pick=all]');top.checked=n===all.length&&n>0;top.indeterminate=n>0&&n<all.length;
+  $('pickCount').textContent=(n===all.length&&n>0?'All ':'')+n+' selected';
 }
 
 function renderAuth(){
@@ -696,7 +768,7 @@ function renderAuth(){
   if(login){
     h+='<form data-form="login"><label>Email<input name="email" type="email" autocomplete="email" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button class="btn primary" type="submit">Log in</button></form>';
   }else{
-    h+='<form data-form="signup"><label>Full name<input name="name" autocomplete="name" required></label><label>Email<input name="email" type="email" autocomplete="email" required></label><label>Password<input name="password" type="password" minlength="6" autocomplete="new-password" required></label><label>Your store<select name="storeId" required><option value="">Select store…</option>'+storeOptions('',true)+'</select></label><button class="btn primary" type="submit">Create account</button></form><p class="hint">New accounts need admin approval before you can log in.</p>';
+    h+='<form data-form="signup"><label>Full name<input name="name" autocomplete="name" required></label><label>Email<input name="email" type="email" autocomplete="email" required></label><label>Password<input name="password" type="password" minlength="6" autocomplete="new-password" required></label><div class="pos"><span class="pos-l">Position</span><label class="radio"><input type="radio" name="position" value="store" checked> Store manager / staff<small>Encodes sales for one store</small></label><label class="radio"><input type="radio" name="position" value="area"> Area manager<small>Views the stores you manage</small></label></div><label id="pickOne">Your store<select name="storeId" required><option value="">Select store…</option>'+storeOptions('')+'</select></label>'+storePicker()+'<button class="btn primary" type="submit">Create account</button></form><p class="hint">New accounts need admin approval before you can log in.</p>';
     if(!S.stores.length)h+='<p class="hint bad">Store list could not be loaded'+(S.storesError?': '+esc(S.storesError):'.')+'</p>';
   }
   h+='</div></div>';
@@ -704,7 +776,7 @@ function renderAuth(){
 }
 
 function renderMain(){
-  var sub=isAdmin()?'Admin · view only':(allStores()?'Area manager · view only':esc(S.me.storeId+' · '+S.me.storeName));
+  var sub=isAdmin()?'Admin · view only':(isViewer()?'Area manager · '+(S.me.scope?myStores().length+' stores':'all stores')+' · view only':esc(S.me.storeId+' · '+S.me.storeName));
   var h='<header class="bar"><div class="logo">'+ICON+'</div><div><h1>Hakot Day Sales</h1><small>'+sub+'</small></div><div class="sp"></div><div class="who">'+esc(S.me.name)+'<br>'+esc(S.me.email)+'</div><button class="btn sm onbar" data-act="logout">Log out</button></header>';
   if(isAdmin()){
     var pend=pendingCount();
@@ -737,7 +809,7 @@ function renderUsers(){
   if(pend.length){
     h+='<h3 class="sec">Waiting for approval</h3><div class="plist">';
     pend.forEach(function(u){
-      h+='<div class="pitem"><div><b>'+esc(u.name)+'</b><div class="muted sm">'+esc(u.email)+'</div><div class="sm">'+esc(u.storeId+' · '+u.storeName)+(u.area?' <span class="muted">('+esc(u.area)+')</span>':'')+'</div><div class="muted sm">Signed up '+esc(u.createdAt)+'</div></div>'+userActions(u)+'</div>';
+      h+='<div class="pitem"><div><b>'+esc(u.name)+'</b><div class="muted sm">'+esc(u.email)+'</div><div class="sm"><span class="badge">'+esc(u.roleLabel)+'</span> '+esc(storeLabel(u))+(u.area&&u.role==='user'?' <span class="muted">('+esc(u.area)+')</span>':'')+'</div><div class="muted sm">Signed up '+esc(u.createdAt)+'</div></div>'+userActions(u)+'</div>';
     });
     h+='</div>';
   }else{
@@ -747,7 +819,7 @@ function renderUsers(){
   var list=S.users.slice().sort(function(a,b){return (order[a.status]-order[b.status])||a.name.localeCompare(b.name)});
   h+='<h3 class="sec">All accounts</h3><div class="tscroll"><table><thead><tr><th class="l">Name</th><th class="l">Email</th><th class="l">Store</th><th class="l">Role</th><th class="l">Status</th><th class="l">Reviewed</th><th></th></tr></thead><tbody>';
   list.forEach(function(u){
-    h+='<tr><td class="l">'+esc(u.name)+'</td><td class="l">'+esc(u.email)+'</td><td class="l">'+esc(u.storeId+' · '+u.storeName)+'</td><td class="l">'+(u.role==='admin'?'Admin':'User')+'</td><td class="l"><span class="st '+u.status+'">'+STATUS_LABEL[u.status]+'</span></td><td class="l muted">'+esc(u.reviewedBy?u.reviewedBy+' · '+u.reviewedAt:'')+'</td><td>'+userActions(u)+'</td></tr>';
+    h+='<tr><td class="l">'+esc(u.name)+'</td><td class="l">'+esc(u.email)+'</td><td class="l wrap">'+esc(storeLabel(u))+'</td><td class="l">'+esc(u.roleLabel)+'</td><td class="l"><span class="st '+u.status+'">'+STATUS_LABEL[u.status]+'</span></td><td class="l muted">'+esc(u.reviewedBy?u.reviewedBy+' · '+u.reviewedAt:'')+'</td><td>'+userActions(u)+'</td></tr>';
   });
   h+='</tbody></table></div>';
   $('users').innerHTML=h;
@@ -771,7 +843,8 @@ function shiftDate(iso,days){var p=iso.split('-');var d=new Date(Date.UTC(+p[0],
 // Admin / area manager: view-only. Date picker + summary; the table below does the rest.
 function renderViewer(){
   var byId={};S.rows.forEach(function(r){if(r.date===S.date)byId[r.storeId]=r});
-  var recs=S.stores.map(function(s){return byId[s.id]}).filter(Boolean);
+  var mine=myStores();
+  var recs=mine.map(function(s){return byId[s.id]}).filter(Boolean);
   // Sales so far = each store's most recent window (running totals), vs LY of those same stores.
   var soFar=0,soFarLy=0,reporting=0;
   recs.forEach(function(r){
@@ -784,8 +857,8 @@ function renderViewer(){
   h+='<div class="grid2"><label>Hakot Day date<input type="date" id="fDate" value="'+esc(S.date)+'"></label>';
   h+='<div class="row" style="align-items:flex-end;gap:6px"><button class="btn ghost sm" data-act="day" data-n="-1">‹ Prev day</button><button class="btn ghost sm" data-act="day" data-n="0">Today</button><button class="btn ghost sm" data-act="day" data-n="1">Next day ›</button></div></div>';
   h+='<div class="preview">';
-  h+='<div class="pv"><small>Stores started</small><b>'+recs.length+' / '+S.stores.length+'</b></div>';
-  h+='<div class="pv"><small>With final sales</small><b>'+finals+' / '+S.stores.length+'</b></div>';
+  h+='<div class="pv"><small>Stores started</small><b>'+recs.length+' / '+mine.length+'</b></div>';
+  h+='<div class="pv"><small>With final sales</small><b>'+finals+' / '+mine.length+'</b></div>';
   h+='<div class="pv"><small>Sales so far ('+reporting+' stores, latest entry)</small><b>'+(reporting?money(soFar):'—')+'</b></div>';
   h+='<div class="pv"><small>VS LY so far</small><b class="'+(vs!=null&&vs>=1?'good':'')+'">'+(vs==null?'—':pct(vs))+'</b></div>';
   h+='</div>';
@@ -793,13 +866,13 @@ function renderViewer(){
 }
 
 function renderEntry(){
-  if(allStores()){renderViewer();return}
+  if(isViewer()){renderViewer();return}
   var st=storeById(S.store);
   var rec=currentRec();
   var lySet=!!rec&&rec.ly!=='';
   var nx=nextWin(rec);
   if(!S.win)S.win=nx||'FINAL';
-  var dis=lySet?'':' disabled';
+  var dis=''; // time windows are always open (no LY or time-slot restriction for now)
 
   var h='<div class="row between"><h2>Encode sales</h2><span class="muted sm">'+esc(fmtDate(S.date))+'</span></div>';
   h+='<div class="grid2"><label>Hakot Day date<input type="date" id="fDate" value="'+esc(S.date)+'"></label>';
@@ -807,9 +880,9 @@ function renderEntry(){
   h+='</div>';
 
   // Step 1: Last Year
-  h+='<div class="step"><div class="step-title"><span class="num">1</span>Last Year (LY)'+(lySet?' <span class="badge">Saved</span>':' <span class="badge warn">Required first</span>')+'</div>';
+  h+='<div class="step"><div class="step-title"><span class="num">1</span>Last Year (LY)'+(lySet?' <span class="badge">Saved</span>':' <span class="badge warn">Needed for VS LY</span>')+'</div>';
   if(!lySet||S.editLY){
-    h+='<p class="hint">Enter the store sales and transaction count from the same day last year. This unlocks the time windows. Use 0 for new stores.</p>';
+    h+='<p class="hint">Enter the store sales and transaction count from the same day last year. You can enter it anytime; VS LY is computed once it is saved. Use 0 for new stores.</p>';
     h+='<div class="grid2"><label>Sales Last Year<input id="fLySales" inputmode="decimal" autocomplete="off" value="'+esc(lySet?rec.ly:'')+'"></label><label>TRX Count LY<input id="fLyTrx" inputmode="numeric" autocomplete="off" value="'+esc(lySet?rec.trxLy:'')+'"></label></div>';
     h+='<div class="actions"><button class="btn primary" data-act="saveLY">Save Last Year</button>'+(S.editLY?'<button class="btn ghost" data-act="cancelLY">Cancel</button>':'')+'</div>';
   }else{
@@ -819,12 +892,14 @@ function renderEntry(){
 
   // Step 2: time windows
   var cur=rec?rec.w[S.win]:{sales:'',trx:''};
-  h+='<div class="step'+(lySet?'':' disabled')+'"><div class="step-title"><span class="num">2</span>Time window sales <span class="muted sm" style="font-weight:500">(running total for the day)</span></div>';
+  h+='<div class="step"><div class="step-title"><span class="num">2</span>Time window sales <span class="muted sm" style="font-weight:500">(running total for the day)</span></div>';
   h+='<div class="chips">'+WINS.map(function(w){
     var done=!!rec&&rec.w[w.k].sales!=='';
     var cls='chip'+(done?' done':'')+(S.win===w.k?' sel':'')+(nx===w.k?' next':'');
     return '<button class="'+cls+'" data-act="win" data-k="'+w.k+'"'+dis+'>'+(done?'✓ ':'')+w.l+'</button>';
   }).join('')+'</div>';
+  if(cur.sales!=='')h+='<p class="hint">Editing the saved '+esc(winLabel(S.win))+' entry. Change the numbers and tap Update to correct it.</p>';
+  else if(rec&&WINS.some(function(w){return rec.w[w.k].sales!==''}))h+='<p class="hint">Made a mistake? Tap a ✓ time slot to correct it.</p>';
   h+='<div class="grid2"><label>Sales · '+esc(winLabel(S.win))+'<input id="fSales" inputmode="decimal" autocomplete="off" value="'+esc(cur.sales)+'"'+dis+'></label><label>TRX count · '+esc(winLabel(S.win))+'<input id="fTrx" inputmode="numeric" autocomplete="off" value="'+esc(cur.trx)+'"'+dis+'></label></div>';
   h+='<div class="preview" id="preview"></div>';
   h+='<div class="actions"><button class="btn primary" data-act="saveWin"'+dis+'>'+(cur.sales!==''?'Update ':'Save ')+esc(winLabel(S.win))+'</button></div></div>';
@@ -884,14 +959,15 @@ function thead(first){
 
 function renderTable(){
   var h;
-  if(allStores()){
+  if(isViewer()){
     var byId={};S.rows.forEach(function(r){if(r.date===S.date)byId[r.storeId]=r});
     var areas=[],by={};
-    S.stores.forEach(function(s){if(!by[s.area]){by[s.area]=[];areas.push(s.area)}by[s.area].push(s)});
-    var finals=S.stores.filter(function(s){var r=byId[s.id];return r&&r.w.FINAL.sales!==''}).length;
-    var started=S.stores.filter(function(s){return !!byId[s.id]}).length;
-    var total=S.stores.length||1;
-    h='<div class="row between"><div><h2>All stores · '+esc(fmtDate(S.date))+'</h2><div class="muted sm">'+started+' of '+S.stores.length+' stores started · '+finals+' with final sales</div></div><button class="btn ghost sm" data-act="refresh">Refresh</button></div>';
+    var mine=myStores();
+    mine.forEach(function(s){if(!by[s.area]){by[s.area]=[];areas.push(s.area)}by[s.area].push(s)});
+    var finals=mine.filter(function(s){var r=byId[s.id];return r&&r.w.FINAL.sales!==''}).length;
+    var started=mine.filter(function(s){return !!byId[s.id]}).length;
+    var total=mine.length||1;
+    h='<div class="row between"><div><h2>'+(S.me.scope?'My stores':'All stores')+' · '+esc(fmtDate(S.date))+'</h2><div class="muted sm">'+started+' of '+mine.length+' stores started · '+finals+' with final sales</div></div><button class="btn ghost sm" data-act="refresh">Refresh</button></div>';
     h+='<div class="progress"><i style="width:'+Math.round(finals/total*100)+'%"></i></div>';
     h+='<div class="tscroll"><table>'+thead([{t:'Store ID',l:1,stick:-1},{t:'Store name',l:1,stick:1},{t:'Sales LY',stick:-1},{t:'TRX LY',stick:-1}])+'<tbody>';
     var allRecs=[];
@@ -911,7 +987,7 @@ function renderTable(){
   }else{
     var rows=S.rows.slice().sort(function(a,b){return a.date<b.date?1:-1});
     h='<div class="row between"><div><h2>My store · '+esc(S.me.storeName)+'</h2><div class="muted sm">'+rows.length+' Hakot Day'+(rows.length===1?'':'s')+' encoded · tap a row to open that date</div></div><button class="btn ghost sm" data-act="refresh">Refresh</button></div>';
-    if(!rows.length){h+='<div class="empty">No entries yet. Start with the Last Year figures above.</div>'}
+    if(!rows.length){h+='<div class="empty">No entries yet. Encode your first time window above.</div>'}
     else{
       h+='<div class="tscroll"><table>'+thead([{t:'Date',l:1,stick:0},{t:'Sales LY',stick:-1},{t:'TRX LY',stick:-1}])+'<tbody>';
       rows.forEach(function(r){
@@ -981,12 +1057,22 @@ document.addEventListener('click',function(e){
 
 async function setDate(iso){
   S.date=iso;S.win=null;S.editLY=false;
-  if(allStores()){try{await loadData()}catch(er){toast(er.message,true)}}
+  if(isViewer()){try{await loadData()}catch(er){toast(er.message,true)}}
   renderEntry();renderTable();
 }
 
 document.addEventListener('change',function(e){
-  if(e.target.id==='fDate'&&e.target.value)setDate(e.target.value);
+  var t=e.target;
+  if(t.id==='fDate'&&t.value)setDate(t.value);
+  if(t.name==='position'){
+    var area=t.value==='area';
+    $('pickOne').hidden=area;$('pickMany').hidden=!area;
+    document.querySelector('select[name=storeId]').required=!area;
+  }
+  var pk=t.getAttribute&&t.getAttribute('data-pick');
+  if(pk==='all'){$('pickMany').querySelectorAll('[data-pick=store]').forEach(function(c){c.checked=t.checked})}
+  else if(pk==='area'){$('pickMany').querySelectorAll('[data-pick=store][data-area="'+CSS.escape(t.getAttribute('data-area'))+'"]').forEach(function(c){c.checked=t.checked})}
+  if(pk)syncPicker();
 });
 
 document.addEventListener('input',function(e){if(e.target.id==='fSales'||e.target.id==='fTrx')updatePreview()});
@@ -1002,6 +1088,12 @@ document.addEventListener('keydown',function(e){
 document.addEventListener('submit',async function(e){
   var f=e.target;var kind=f.getAttribute('data-form');if(!kind)return;e.preventDefault();
   var data={};new FormData(f).forEach(function(v,k){data[k]=v});
+  if(kind==='signup'&&data.position==='area'){
+    var boxes=f.querySelectorAll('[data-pick=store]'),ids=[];
+    boxes.forEach(function(c){if(c.checked)ids.push(c.value)});
+    if(!ids.length){toast('Select the stores you manage.',true);return}
+    data.storeIds=ids.length===boxes.length?'ALL':ids;delete data.storeId;
+  }
   var btn=f.querySelector('button[type=submit]');var old=btn.textContent;btn.disabled=true;btn.textContent='Please wait…';
   try{
     var j=await api('/api/'+kind,data);
