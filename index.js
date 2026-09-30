@@ -141,6 +141,11 @@ async function ensureSheets() {
     const head = (await getValues(USERS_SHEET + '!A1:K1'))[0] || [];
     if (idStr(head[8]) !== 'Status') await putValues(USERS_SHEET + '!I1:K1', [USER_HEADERS.slice(8)]);
   }
+  // Day-total block beside FINAL SALES (AI..AL).
+  const tot = await getValues(DATA_SHEET + '!AI1:AL2');
+  if (idStr((tot[0] || [])[0]) !== 'TOTAL') {
+    await putValues(DATA_SHEET + '!AI1:AL2', [['TOTAL', '', '', ''], ['Sales', 'TRX', 'Basket Size', 'VS LY']]);
+  }
   sheetsReady = true;
 }
 
@@ -212,15 +217,22 @@ function cellsToRec(c, row) {
   return rec;
 }
 
+// Each window holds that slot's own sales/TRX (not a running total).
+// Per slot: Basket = slot sales / slot TRX; VS LY = running total through that slot / Sales LY.
+// AI..AL: TOTAL Sales, TRX, Basket, VS LY = sum of all saved slots.
+const pctText = (v, ly) => (ly > 0 ? ((v / ly) * 100).toFixed(2) + '%' : '');
+const basketOf = (s, t) => (t > 0 ? Math.round((s / t) * 100) / 100 : '');
 function recToCells(rec) {
   const id = /^\d+$/.test(rec.storeId) ? Number(rec.storeId) : safeText(rec.storeId);
   const out = [rec.date, safeText(rec.area), id, safeText(rec.storeName), rec.ly, rec.trxLy];
+  let cumSales = 0, cumTrx = 0, any = false;
   WINDOWS.forEach(w => {
     const { sales, trx } = rec.w[w.key];
-    const basket = sales !== '' && trx > 0 ? Math.round((sales / trx) * 100) / 100 : '';
-    const vsly = sales !== '' && rec.ly > 0 ? ((sales / rec.ly) * 100).toFixed(2) + '%' : '';
-    out.push(sales, trx, basket, vsly);
+    if (sales === '') { out.push('', trx, '', ''); return; }
+    any = true; cumSales += sales; cumTrx += trx === '' ? 0 : trx;
+    out.push(sales, trx, trx !== '' ? basketOf(sales, trx) : '', pctText(cumSales, rec.ly));
   });
+  out.push(any ? cumSales : '', any ? cumTrx : '', any ? basketOf(cumSales, cumTrx) : '', any ? pctText(cumSales, rec.ly) : '');
   return out;
 }
 
@@ -481,9 +493,9 @@ app.post('/api/save', requireUser, wrap(async (req, res) => {
 
   const cells = recToCells(rec);
   if (existing) {
-    await putValues(DATA_SHEET + '!A' + existing.row + ':AH' + existing.row, [cells]);
+    await putValues(DATA_SHEET + '!A' + existing.row + ':AL' + existing.row, [cells]);
   } else {
-    await appendValues(DATA_SHEET + '!A:AH', [cells]);
+    await appendValues(DATA_SHEET + '!A:AL', [cells]);
   }
   await ensureSheets();
   await appendValues(LOG_SHEET + '!A:I', [[
@@ -1089,12 +1101,15 @@ function currentRec(){for(var i=0;i<S.rows.length;i++){var r=S.rows[i];if(r.date
 function nextWin(rec){if(!rec)return WINS[0].k;for(var i=0;i<WINS.length;i++){if(rec.w[WINS[i].k].sales==='')return WINS[i].k}return null}
 function basket(s,t){return s!==''&&t>0?s/t:null}
 function vsly(s,ly){return s!==''&&ly>0?s/ly:null}
-function latest(rec){if(!rec)return null;var l=null;WINS.forEach(function(w,i){var v=rec.w[w.k];if(v.sales!=='')l={i:i,k:w.k,l:w.l,sales:v.sales,trx:v.trx===''?0:v.trx}});return l}
+// Slots hold each time slot's own sales. latest() returns the latest saved slot (i,k,l)
+// together with the DAY TOTAL so far: sales/trx summed over every saved slot.
+function latest(rec){if(!rec)return null;var l=null,s=0,t=0,n=0;WINS.forEach(function(w,i){var v=rec.w[w.k];if(v.sales!==''){n++;s+=v.sales;t+=(v.trx===''?0:v.trx);l={i:i,k:w.k,l:w.l}}});if(!l)return null;l.sales=s;l.trx=t;l.n=n;return l}
+function cumThrough(rec,k){var s=0,stop=false;WINS.forEach(function(w){if(stop)return;var v=rec.w[w.k];if(v.sales!=='')s+=v.sales;if(w.k===k)stop=true});return s}
 function storeStatus(rec){var l=latest(rec);if(!l)return 'none';return rec.w.FINAL.sales!==''?'final':'progress'}
-function savedPoints(rec){var pts=[],prev=0;if(rec)WINS.forEach(function(w,i){var v=rec.w[w.k];if(v.sales!==''){pts.push({i:i,k:w.k,l:w.l,sales:v.sales,trx:v.trx===''?0:v.trx,inc:v.sales-prev});prev=v.sales}});return pts}
-function prevSaved(rec,key){if(!rec)return null;var idx=WINS.findIndex(function(w){return w.k===key});for(var i=idx-1;i>=0;i--){var v=rec.w[WINS[i].k];if(v.sales!=='')return {k:WINS[i].k,sales:v.sales,trx:v.trx}}return null}
-function laterSaved(rec,key){if(!rec)return null;var idx=WINS.findIndex(function(w){return w.k===key});for(var i=idx+1;i<WINS.length;i++){var v=rec.w[WINS[i].k];if(v.sales!=='')return {k:WINS[i].k,sales:v.sales,trx:v.trx}}return null}
-function recWin(rec,k){var v=rec.w[k];return {sales:v.sales,trx:v.trx,basket:basket(v.sales,v.trx),vs:vsly(v.sales,rec.ly)}}
+// sales/trx = that slot's own figures; cum/cumTrx = running day total through the slot.
+function savedPoints(rec){var pts=[],cs=0,ct=0;if(rec)WINS.forEach(function(w,i){var v=rec.w[w.k];if(v.sales!==''){var t=v.trx===''?0:v.trx;cs+=v.sales;ct+=t;pts.push({i:i,k:w.k,l:w.l,sales:v.sales,trx:t,cum:cs,cumTrx:ct})}});return pts}
+// Per-slot cell: slot sales/TRX/basket; VS LY = running total through the slot / LY (matches the sheet).
+function recWin(rec,k){var v=rec.w[k];return {sales:v.sales,trx:v.trx,basket:basket(v.sales,v.trx),vs:v.sales!==''&&rec.ly>0?cumThrough(rec,k)/rec.ly:null}}
 function byIdMap(){var m={};S.rows.forEach(function(r){if(r.date===S.date)m[r.storeId]=r});return m}
 function roleLine(){if(isAdmin())return 'Administrator';if(isViewer())return 'Area manager';return 'Store '+S.me.storeId+' · '+S.me.storeName}
 function storeLabel(u){if(u.role==='user')return u.storeId+' · '+u.storeName;if(u.role==='admin')return 'All stores';return u.scope?(u.scope.length+' store'+(u.scope.length===1?'':'s')+': '+u.storeName):'All stores'}
@@ -1106,12 +1121,12 @@ function agg(recs){
   recs.forEach(function(r){if(r.ly!=='')o.ly=(o.ly||0)+r.ly;if(r.trxLy!=='')o.trxLy=(o.trxLy||0)+r.trxLy});
   WINS.forEach(function(w){
     var s=0,t=0,sl=0,l=0,n=0;
-    recs.forEach(function(r){var v=r.w[w.k];if(v.sales!==''){n++;s+=v.sales;t+=(v.trx||0);if(r.ly>0){sl+=v.sales;l+=r.ly}}});
+    recs.forEach(function(r){var v=r.w[w.k];if(v.sales!==''){n++;s+=v.sales;t+=(v.trx||0);if(r.ly>0){sl+=cumThrough(r,w.k);l+=r.ly}}});
     o.w[w.k]={sales:n?s:'',trx:n?t:'',basket:t>0?s/t:null,vs:l>0?sl/l:null};
   });
   return o;
 }
-function soFar(recs){var s=0,sl=0,l=0,n=0;recs.forEach(function(r){var x=latest(r);if(x){n++;s+=x.sales;if(r.ly>0){sl+=x.sales;l+=r.ly}}});return {sales:n?s:'',vs:l>0?sl/l:null}}
+function soFar(recs){var s=0,t=0,sl=0,l=0,n=0;recs.forEach(function(r){var x=latest(r);if(x){n++;s+=x.sales;t+=x.trx;if(r.ly>0){sl+=x.sales;l+=r.ly}}});return {sales:n?s:'',trx:n?t:'',vs:l>0?sl/l:null}}
 
 /* ================= API ================= */
 async function api(path,body,method){
@@ -1288,7 +1303,7 @@ function pwField(id,label,auto,help){return field({id:id,name:'password',label:l
 function renderAuth(){
   var login=S.authTab==='login';
   var h='<div class="auth"><aside class="auth-hero"><div class="brand">'+BRAND+'<div><div class="brand-name">Hakot Day</div><div class="brand-sub">Sales Monitoring</div></div></div>';
-  h+='<div class="hero-copy"><h1>Hour-by-hour store sales, measured against last year.</h1><ul class="hero-list"><li>'+icon('checkc')+'<span>Encode running sales and transactions for every time slot</span></li><li>'+icon('checkc')+'<span>See performance against last year as the day unfolds</span></li><li>'+icon('checkc')+'<span>Give area managers and executives a live view of every store</span></li></ul></div><div class="hero-foot">Internal business system · Authorized users only</div></aside>';
+  h+='<div class="hero-copy"><h1>Hour-by-hour store sales, measured against last year.</h1><ul class="hero-list"><li>'+icon('checkc')+'<span>Encode sales and transactions for each time slot; the day total adds up automatically</span></li><li>'+icon('checkc')+'<span>See performance against last year as the day unfolds</span></li><li>'+icon('checkc')+'<span>Give area managers and executives a live view of every store</span></li></ul></div><div class="hero-foot">Internal business system · Authorized users only</div></aside>';
   h+='<main class="auth-main"><div class="auth-card"><div class="auth-mobile-brand">'+BRAND+'<span>Hakot Day</span></div>';
   h+='<h1 class="auth-title">'+(login?'Sign in':'Create your account')+'</h1><p class="auth-sub">'+(login?'Use the email and password you registered with.':'New accounts are reviewed by an administrator before first sign-in.')+'</p>';
   h+='<div class="tabs auth-tabs" role="tablist" aria-label="Account"><button class="tab" role="tab" aria-selected="'+login+'" data-act="tab" data-t="login">Sign in</button><button class="tab" role="tab" aria-selected="'+(!login)+'" data-act="tab" data-t="signup">Create account</button></div>';
@@ -1312,9 +1327,9 @@ function renderEncode(){
   var h=pageHead('Encode Sales',esc(st?st.id+' · '+st.name:S.me.storeId+' · '+S.me.storeName)+' · '+esc(fmtDate(S.date)),dateCtl());
   if(S.loading){$('content').innerHTML=h+skelKpis(4)+'<div class="encode-grid">'+skelCard(420)+'<div class="chart-stack">'+skelCard(200)+skelCard(200)+'</div></div>';return}
   if(S.loadError){$('content').innerHTML=h+'<div class="card">'+errorBlock(S.loadError)+'</div>';return}
-  h+='<div class="kpis" id="kpis" role="region" aria-label="Running totals versus last year"></div><div class="encode-grid"><section class="card" id="entry" aria-labelledby="entry-t"></section><div class="chart-stack">';
-  h+='<section class="card chart" id="chCum" aria-labelledby="chCum-t"><div class="card-h"><div><h2 class="card-t" id="chCum-t">Running sales vs LY full day</h2><div class="card-s" id="chCum-s"></div></div></div><div class="card-b"><div class="plot"></div></div><div class="ctip" role="tooltip"></div></section>';
-  h+='<section class="card chart" id="chInc" aria-labelledby="chInc-t"><div class="card-h"><div><h2 class="card-t" id="chInc-t">Sales added per time slot</h2><div class="card-s" id="chInc-s"></div></div></div><div class="card-b"><div class="plot"></div></div><div class="ctip" role="tooltip"></div></section>';
+  h+='<div class="kpis" id="kpis" role="region" aria-label="Day total versus last year"></div><div class="encode-grid"><section class="card" id="entry" aria-labelledby="entry-t"></section><div class="chart-stack">';
+  h+='<section class="card chart" id="chCum" aria-labelledby="chCum-t"><div class="card-h"><div><h2 class="card-t" id="chCum-t">Day total vs LY full day</h2><div class="card-s" id="chCum-s"></div></div></div><div class="card-b"><div class="plot"></div></div><div class="ctip" role="tooltip"></div></section>';
+  h+='<section class="card chart" id="chInc" aria-labelledby="chInc-t"><div class="card-h"><div><h2 class="card-t" id="chInc-t">Sales per time slot</h2><div class="card-s" id="chInc-s"></div></div></div><div class="card-b"><div class="plot"></div></div><div class="ctip" role="tooltip"></div></section>';
   h+='</div></div>';
   $('content').innerHTML=h;
   renderStoreKpis();renderEntry();renderStoreCharts();
@@ -1325,14 +1340,15 @@ function renderStoreKpis(){
   var rec=currentRec(),pts=savedPoints(rec),last=pts[pts.length-1];
   var ly=rec&&rec.ly!==''?rec.ly:0,trxLy=rec&&rec.trxLy!==''?rec.trxLy:0;
   if(!last){
-    el.innerHTML=kpi({label:'Sales so far',value:'—',foot:'No time slot saved yet'})+kpi({label:'VS LY · full day',value:'—',foot:ly>0?'LY '+peso(ly):'Enter last year to compare'})+kpi({label:'Transactions',value:'—',foot:trxLy>0?'LY '+int(trxLy):'—'})+kpi({label:'Basket size',value:'—',foot:'—'});
+    el.innerHTML=kpi({label:'Total sales',value:'—',foot:'No time slot saved yet'})+kpi({label:'VS LY · full day',value:'—',foot:ly>0?'LY '+peso(ly):'Enter last year to compare'})+kpi({label:'Total transactions',value:'—',foot:trxLy>0?'LY '+int(trxLy):'—'})+kpi({label:'Basket size',value:'—',foot:'—'});
     return;
   }
-  var h=kpi({label:'Sales so far',value:peso(last.sales),foot:'As of '+esc(last.l),spark:sparkline(pts.map(function(p){return p.sales}))});
-  if(ly>0){var p=last.sales/ly,gap=ly-last.sales;h+=kpi({label:'VS LY · full day',value:pct(p),meter:meterHtml(p,'Percent of last year full-day sales'),foot:p>=1?'<span class="badge success">'+icon('check')+'Beat LY</span><span>by '+peso(-gap)+'</span>':'<span>'+peso(gap)+' to match LY</span>'})}
+  var tot=latest(rec);
+  var h=kpi({label:'Total sales',value:peso(tot.sales),foot:tot.n+' of '+WINS.length+' slots · latest '+esc(SHORT[tot.k]),spark:sparkline(pts.map(function(p){return p.cum}))});
+  if(ly>0){var p=tot.sales/ly,gap=ly-tot.sales;h+=kpi({label:'VS LY · full day',value:pct(p),meter:meterHtml(p,'Percent of last year full-day sales'),foot:p>=1?'<span class="badge success">'+icon('check')+'Beat LY</span><span>by '+peso(-gap)+'</span>':'<span>'+peso(gap)+' to match LY</span>'})}
   else h+=kpi({label:'VS LY · full day',value:'—',foot:'Enter last year to compare'});
-  h+=kpi({label:'Transactions',value:int(last.trx),foot:trxLy>0?'<span>'+pct(last.trx/trxLy)+' of LY ('+int(trxLy)+')</span>':'LY TRX not set'});
-  var bk=last.trx>0?last.sales/last.trx:null,bkLy=ly>0&&trxLy>0?ly/trxLy:null;
+  h+=kpi({label:'Total transactions',value:int(tot.trx),foot:trxLy>0?'<span>'+pct(tot.trx/trxLy)+' of LY ('+int(trxLy)+')</span>':'LY TRX not set'});
+  var bk=tot.trx>0?tot.sales/tot.trx:null,bkLy=ly>0&&trxLy>0?ly/trxLy:null;
   h+=kpi({label:'Basket size',value:bk==null?'—':peso(bk),foot:bk!=null&&bkLy!=null?deltaHtml(bk/bkLy-1,'vs LY '+peso(bkLy)):'LY basket not available'});
   el.innerHTML=h;
 }
@@ -1342,7 +1358,7 @@ function renderEntry(){
   if(!S.win)S.win=nx||'FINAL';
   var saved=rec?WINS.filter(function(w){return rec.w[w.k].sales!==''}).length:0;
   var cur=rec?rec.w[S.win]:{sales:'',trx:''},editing=cur.sales!=='';
-  var h='<div class="card-h"><div><h2 class="card-t" id="entry-t">Encode sales</h2><div class="card-s">Running totals for '+esc(fmtDateShort(S.date))+'</div></div><span class="badge '+(saved===WINS.length?'success':saved?'info':'')+'">'+saved+' of '+WINS.length+' saved</span></div>';
+  var h='<div class="card-h"><div><h2 class="card-t" id="entry-t">Encode sales</h2><div class="card-s">Sales per time slot for '+esc(fmtDateShort(S.date))+'</div></div><span class="badge '+(saved===WINS.length?'success':saved?'info':'')+'">'+saved+' of '+WINS.length+' saved</span></div>';
   h+='<div class="sec"><div class="sec-t"><span>Last year · same day</span>'+(lySet?'<span class="badge success">'+icon('check')+'Saved</span>':'<span class="badge warning">Needed for VS LY</span>')+'</div>';
   if(!lySet||S.editLY){
     h+='<div class="grid-2">'+field({id:'fLySales',label:'Sales last year',val:lySet?rec.ly:'',req:true,money:true,mode:'decimal'})+field({id:'fLyTrx',label:'TRX count last year',val:lySet?rec.trxLy:'',req:true,mode:'numeric'})+'</div>';
@@ -1350,7 +1366,7 @@ function renderEntry(){
   }else{
     h+='<div class="ly-box"><div><span class="mini-l">Sales LY</span><span class="mini-v">'+peso(rec.ly)+'</span></div><div><span class="mini-l">TRX LY</span><span class="mini-v">'+int(rec.trxLy)+'</span></div><div class="sp"></div><button class="btn btn-ghost btn-sm" data-act="editLY" aria-label="Edit last year figures">'+icon('edit')+'Edit</button></div>';
   }
-  h+='</div><div class="sec"><div class="sec-t"><span id="slotL">Time slot</span><span class="sec-note">Select a saved slot to correct it</span></div><div class="slots" role="radiogroup" aria-labelledby="slotL">';
+  h+='</div><div class="sec"><div class="sec-t"><span id="slotL">Time slot</span><span class="sec-note">Enter each slot’s own sales · select a saved slot to correct it</span></div><div class="slots" role="radiogroup" aria-labelledby="slotL">';
   WINS.forEach(function(w){
     var done=!!rec&&rec.w[w.k].sales!=='',sel=S.win===w.k;
     h+='<button class="slot'+(done?' done':'')+(sel?' sel':'')+(nx===w.k&&!done?' next':'')+'" role="radio" aria-checked="'+sel+'" data-act="win" data-k="'+w.k+'" aria-label="'+w.l+(done?', saved':nx===w.k?', next':'')+'"><span class="slot-l">'+SHORT[w.k]+'</span><span class="slot-s">'+(done?icon('check')+'Saved':nx===w.k?'Next':'Open')+'</span></button>';
@@ -1365,23 +1381,25 @@ function updatePreview(){
   var el=$('preview');if(!el)return;
   var rec=currentRec(),ly=rec?rec.ly:'';
   var s=num($('fSales')?$('fSales').value:''),t=num($('fTrx')?$('fTrx').value:'');
-  var b=basket(s,t),v=vsly(s,ly),p=prevSaved(rec,S.win);
-  var h='<div class="pv"><small>Basket</small><b>'+(b==null?'—':peso(b))+'</b></div><div class="pv"><small>VS LY</small><b class="'+(v!=null&&v>=1?'pos':'')+'">'+(v==null?'—':pct(v))+'</b></div>';
-  var d=p&&s!==''?s-p.sales:null;
-  h+='<div class="pv"><small>'+(p?'vs '+SHORT[p.k]:'Added')+'</small><b class="'+(d==null?'':d<0?'neg':'pos')+'">'+(d==null?(p?'—':(s===''?'—':'+'+peso(s))):(d>=0?'+':'')+peso(d))+'</b></div>';
+  // Day total if this slot is saved with the typed figures: other saved slots + this entry.
+  var others=0;if(rec)WINS.forEach(function(w){var v=rec.w[w.k];if(w.k!==S.win&&v.sales!=='')others+=v.sales});
+  var total=s===''?null:others+s,v=total!=null&&ly>0?total/ly:null,b=basket(s,t);
+  var h='<div class="pv"><small>Slot basket</small><b>'+(b==null?'—':peso(b))+'</b></div>';
+  h+='<div class="pv"><small>Day total</small><b>'+(total==null?(others?peso(others):'—'):peso(total))+'</b></div>';
+  h+='<div class="pv"><small>VS LY (total)</small><b class="'+(v!=null&&v>=1?'pos':'')+'">'+(v==null?'—':pct(v))+'</b></div>';
   el.innerHTML=h;
 }
 function renderStoreCharts(){
   var a=$('chCum'),b=$('chInc');if(!a||!b)return;
   var rec=currentRec(),pts=savedPoints(rec),ly=rec&&rec.ly!==''?rec.ly:0;
-  $('chCum-s').textContent=ly>0?'Cumulative sales by time slot · horizontal line marks LY full-day total':'Cumulative sales by time slot';
+  $('chCum-s').textContent=ly>0?'Running day total (sum of slots) · horizontal line marks LY full-day total':'Running day total (sum of slots)';
   if(!pts.length){
-    $('chInc-s').textContent='Sales contributed by each time slot';
+    $('chInc-s').textContent='Each time slot\u2019s own sales';
     [a,b].forEach(function(x){x.querySelector('.plot').innerHTML=stateBlock('trend','No data yet','Charts appear after the first time slot is saved.')});
     return;
   }
-  var peak=pts.reduce(function(m,x){return x.inc>m.inc?x:m},pts[0]);
-  $('chInc-s').textContent='Peak slot: '+peak.l+' (+'+peso(peak.inc)+')';
+  var peak=pts.reduce(function(m,x){return x.sales>m.sales?x:m},pts[0]);
+  $('chInc-s').textContent='Peak slot: '+peak.l+' ('+peso(peak.sales)+')';
   drawCum(a,pts,ly);drawInc(b,pts);
 }
 
@@ -1403,21 +1421,21 @@ function axisY(L,R,W,y,v,label){return '<line x1="'+L+'" x2="'+(W-R)+'" y1="'+y+
 function drawCum(box,pts,ly){
   var plot=box.querySelector('.plot'),n=WINS.length;
   var W=Math.max(280,plot.clientWidth),H=220,L=52,R=14,T=22,B=28,pw=W-L-R,ph=H-T-B;
-  var maxV=Math.max(ly,pts.reduce(function(m,p){return Math.max(m,p.sales)},0))*1.08||1;
+  var maxV=Math.max(ly,pts.reduce(function(m,p){return Math.max(m,p.cum)},0))*1.08||1;
   var st=niceStep(maxV,4),top=Math.ceil(maxV/st)*st;
   function x(i){return L+pw*i/(n-1)}
   function y(v){return T+ph*(1-v/top)}
-  var s='<svg viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'" role="img" aria-label="Cumulative sales by time slot'+(ly>0?', compared with the last-year full-day total':'')+'">';
+  var s='<svg viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'" role="img" aria-label="Running day total by time slot'+(ly>0?', compared with the last-year full-day total':'')+'">';
   for(var v=st;v<=top+1e-6;v+=st)s+=axisY(L,R,W,y(v),v,compact(v));
   s+='<line x1="'+L+'" x2="'+(W-R)+'" y1="'+y(0)+'" y2="'+y(0)+'" stroke="var(--axis)" stroke-width="1"/><text x="'+(L-8)+'" y="'+(y(0)+4)+'" text-anchor="end" font-size="11" fill="var(--text-3)">0</text>';
   WINS.forEach(function(w,i){s+='<text x="'+x(i)+'" y="'+(H-8)+'" text-anchor="middle" font-size="11" fill="var(--text-3)">'+SHORT[w.k]+'</text>'});
   if(ly>0)s+='<line x1="'+L+'" x2="'+(W-R)+'" y1="'+y(ly)+'" y2="'+y(ly)+'" stroke="var(--text-2)" stroke-opacity=".7" stroke-width="1.5"/><text x="'+(W-R)+'" y="'+(y(ly)-6)+'" text-anchor="end" font-size="11" font-weight="600" fill="var(--text-2)">LY full day '+cpeso(ly)+'</text>';
   s+='<line class="xh" x1="0" x2="0" y1="'+T+'" y2="'+y(0)+'" stroke="var(--text-3)" stroke-width="1" visibility="hidden"/>';
-  var line=pts.map(function(p){return x(p.i)+','+y(p.sales)});
+  var line=pts.map(function(p){return x(p.i)+','+y(p.cum)});
   if(pts.length>1)s+='<path d="M'+x(pts[0].i)+','+y(0)+' L'+line.join(' L')+' L'+x(pts[pts.length-1].i)+','+y(0)+' Z" fill="var(--series-wash)"/>';
   s+='<polyline points="'+line.join(' ')+'" fill="none" stroke="var(--series)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
-  pts.forEach(function(p){s+='<circle cx="'+x(p.i)+'" cy="'+y(p.sales)+'" r="4" fill="var(--series)" stroke="var(--surface)" stroke-width="2"/>'});
-  var e=pts[pts.length-1],ex=x(e.i),ey=y(e.sales),lab=compact(e.sales)+(ly>0?' · '+pct(e.sales/ly):'');
+  pts.forEach(function(p){s+='<circle cx="'+x(p.i)+'" cy="'+y(p.cum)+'" r="4" fill="var(--series)" stroke="var(--surface)" stroke-width="2"/>'});
+  var e=pts[pts.length-1],ex=x(e.i),ey=y(e.cum),lab=compact(e.cum)+(ly>0?' · '+pct(e.cum/ly):'');
   var anchor=e.i>=n-2?'end':'start',lx=anchor==='end'?ex-8:ex+8,lyPos=ly>0&&Math.abs(ey-y(ly))<18?ey+18:ey-10;
   s+='<text x="'+lx+'" y="'+lyPos+'" text-anchor="'+anchor+'" font-size="12" font-weight="700" fill="var(--text)">'+lab+'</text>';
   var cw=pw/(n-1);
@@ -1426,8 +1444,8 @@ function drawCum(box,pts,ly){
   var byI={};pts.forEach(function(p){byI[p.i]=p});
   bindHits(box,function(i){
     var xh=box.querySelector('.xh');xh.setAttribute('x1',x(i));xh.setAttribute('x2',x(i));xh.setAttribute('visibility','visible');
-    var p=byI[i],pos=relPos(box,plot,x(i),p?y(p.sales):T+ph/2,W);
-    var html=p?'<b>'+esc(p.l)+'</b>Sales '+peso(p.sales)+'<br>TRX '+int(p.trx)+(p.trx>0?'<br>Basket '+peso(p.sales/p.trx):'')+(ly>0?'<br>VS LY '+pct(p.sales/ly):'')+'<br>Added +'+peso(p.inc):'<b>'+esc(WINS[i].l)+'</b>Not encoded yet';
+    var p=byI[i],pos=relPos(box,plot,x(i),p?y(p.cum):T+ph/2,W);
+    var html=p?'<b>'+esc(p.l)+'</b>Slot sales '+peso(p.sales)+'<br>Slot TRX '+int(p.trx)+'<br>Day total '+peso(p.cum)+(ly>0?'<br>VS LY (total) '+pct(p.cum/ly):''):'<b>'+esc(WINS[i].l)+'</b>Not encoded yet';
     showTip(box,html,pos[0],pos[1]);
   });
 }
@@ -1435,24 +1453,24 @@ function roundedBar(x0,y0,yv,bw){var h=Math.abs(y0-yv),r=Math.min(4,h,bw/2);if(y
 function drawInc(box,pts){
   var plot=box.querySelector('.plot'),n=WINS.length;
   var W=Math.max(280,plot.clientWidth),H=220,L=52,R=14,T=22,B=28,pw=W-L-R,ph=H-T-B;
-  var maxV=Math.max(0,pts.reduce(function(m,p){return Math.max(m,p.inc)},0)),minV=Math.min(0,pts.reduce(function(m,p){return Math.min(m,p.inc)},0));
+  var maxV=Math.max(0,pts.reduce(function(m,p){return Math.max(m,p.sales)},0)),minV=Math.min(0,pts.reduce(function(m,p){return Math.min(m,p.sales)},0));
   var st=niceStep(((maxV-minV)*1.12)||1,4),top=Math.ceil(maxV*1.12/st)*st||st,bot=Math.floor(minV/st)*st;
   function y(v){return T+ph*(top-v)/(top-bot)}
   var band=pw/n,bw=Math.min(24,band*0.6);
   function cx(i){return L+band*i+band/2}
-  var s='<svg viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'" role="img" aria-label="Sales added in each time slot">';
+  var s='<svg viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'" role="img" aria-label="Sales in each time slot">';
   for(var v=bot;v<=top+1e-6;v+=st){if(Math.abs(v)<1e-9)continue;s+=axisY(L,R,W,y(v),v,compact(v))}
   s+='<line x1="'+L+'" x2="'+(W-R)+'" y1="'+y(0)+'" y2="'+y(0)+'" stroke="var(--axis)" stroke-width="1"/><text x="'+(L-8)+'" y="'+(y(0)+4)+'" text-anchor="end" font-size="11" fill="var(--text-3)">0</text>';
   WINS.forEach(function(w,i){s+='<text x="'+cx(i)+'" y="'+(H-8)+'" text-anchor="middle" font-size="11" fill="var(--text-3)">'+SHORT[w.k]+'</text>'});
-  pts.forEach(function(p){if(Math.abs(y(0)-y(p.inc))<0.5)return;s+='<path d="'+roundedBar(cx(p.i)-bw/2,y(0),y(p.inc),bw)+'" fill="var(--series)"/>'});
-  var peak=pts.reduce(function(m,x){return x.inc>m.inc?x:m},pts[0]);
-  if(peak.inc>0)s+='<text x="'+cx(peak.i)+'" y="'+(y(peak.inc)-6)+'" text-anchor="middle" font-size="12" font-weight="700" fill="var(--text)">+'+compact(peak.inc)+'</text>';
+  pts.forEach(function(p){if(Math.abs(y(0)-y(p.sales))<0.5)return;s+='<path d="'+roundedBar(cx(p.i)-bw/2,y(0),y(p.sales),bw)+'" fill="var(--series)"/>'});
+  var peak=pts.reduce(function(m,x){return x.sales>m.sales?x:m},pts[0]);
+  if(peak.sales>0)s+='<text x="'+cx(peak.i)+'" y="'+(y(peak.sales)-6)+'" text-anchor="middle" font-size="12" font-weight="700" fill="var(--text)">'+compact(peak.sales)+'</text>';
   WINS.forEach(function(w,i){s+='<rect data-hit="'+i+'" x="'+(L+band*i)+'" y="'+T+'" width="'+band+'" height="'+ph+'" fill="transparent"/>'});
   plot.innerHTML=s+'</svg>';
-  var byI={},total=pts[pts.length-1].sales;pts.forEach(function(p){byI[p.i]=p});
+  var byI={},total=pts[pts.length-1].cum;pts.forEach(function(p){byI[p.i]=p});
   bindHits(box,function(i){
-    var p=byI[i],pos=relPos(box,plot,cx(i),p?Math.min(y(p.inc),y(0)):T+ph/2,W);
-    showTip(box,p?'<b>'+esc(p.l)+'</b>Added +'+peso(p.inc)+(total>0?'<br>'+(p.inc/total*100).toFixed(1)+'% of sales so far':'')+'<br>Running total '+peso(p.sales):'<b>'+esc(WINS[i].l)+'</b>Not encoded yet',pos[0],pos[1]);
+    var p=byI[i],pos=relPos(box,plot,cx(i),p?Math.min(y(p.sales),y(0)):T+ph/2,W);
+    showTip(box,p?'<b>'+esc(p.l)+'</b>Slot sales '+peso(p.sales)+'<br>Slot TRX '+int(p.trx)+(p.trx>0?'<br>Slot basket '+peso(p.sales/p.trx):'')+(total>0?'<br>'+(p.sales/total*100).toFixed(1)+'% of day total':''):'<b>'+esc(WINS[i].l)+'</b>Not encoded yet',pos[0],pos[1]);
   });
 }
 function drawRank(box,items){
@@ -1460,7 +1478,7 @@ function drawRank(box,items){
   var W=Math.max(300,plot.clientWidth),rowH=26,T=24,B=6,L=Math.round(Math.min(170,Math.max(104,W*0.3))),R=62,pw=W-L-R,H=T+items.length*rowH+B;
   var maxV=Math.max(1,items.reduce(function(m,x){return Math.max(m,x.vs)},0))*1.04,step=maxV>2.2?0.5:0.25;
   function x(v){return L+pw*v/maxV}
-  var s='<svg viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'" role="img" aria-label="Sales so far as a percent of last-year full-day sales, by store">';
+  var s='<svg viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'" role="img" aria-label="Day total as a percent of last-year full-day sales, by store">';
   for(var v=0;v<=maxV+1e-6;v+=step){var gx=x(v),is100=Math.abs(v-1)<1e-9;s+='<line x1="'+gx+'" x2="'+gx+'" y1="'+(T-4)+'" y2="'+(H-B)+'" stroke="'+(is100?'var(--text-2)':'var(--grid)')+'" stroke-opacity="'+(is100?.7:1)+'" stroke-width="'+(is100?1.5:1)+'"/><text x="'+gx+'" y="'+(T-10)+'" text-anchor="middle" font-size="11" '+(is100?'font-weight="700" fill="var(--text-2)">100% LY':'fill="var(--text-3)">'+Math.round(v*100)+'%')+'</text>'}
   var maxChars=Math.floor((L-14)/6.6);
   items.forEach(function(it,i){
@@ -1474,7 +1492,7 @@ function drawRank(box,items){
   plot.innerHTML=s+'</svg>';
   bindHits(box,function(i){
     var it=items[i],pos=relPos(box,plot,Math.min(x(it.vs),W-R),T+i*rowH+4,W);
-    showTip(box,'<b>'+esc(it.name)+' ('+esc(it.id)+')</b>'+esc(it.area)+'<br>Latest: '+esc(it.last.l)+'<br>Sales so far '+peso(it.sales)+'<br>LY full day '+peso(it.ly)+'<br>VS LY '+pct(it.vs),pos[0],pos[1]);
+    showTip(box,'<b>'+esc(it.name)+' ('+esc(it.id)+')</b>'+esc(it.area)+'<br>Latest slot: '+esc(it.last.l)+'<br>Total sales '+peso(it.sales)+'<br>LY full day '+peso(it.ly)+'<br>VS LY '+pct(it.vs),pos[0],pos[1]);
   });
 }
 function drawReport(box,counts,total){
@@ -1523,6 +1541,7 @@ function sortVal(row,key){
   if(key==='trxLy')return row.r.trxLy===''?NEG:row.r.trxLy;
   if(key==='latest')return row.l?row.l.i:NEG;
   if(key==='sofar')return row.l?row.l.sales:NEG;
+  if(key==='sotrx')return row.l?row.l.trx:NEG;
   if(key==='vs')return row.vs==null?NEG:row.vs;
   if(key.indexOf('w:')===0){var p=key.split(':'),v=recWin(row.r,p[1])[p[2]];return v===''||v==null?NEG:v}
   return 0;
@@ -1560,16 +1579,16 @@ function renderHistTable(){
   var st=S.hsort,a='hsort',wh=winHeads(st,a);
   var h='<div class="table-wrap"><table class="dt'+(PREF.density==='compact'?' dense':'')+'"><caption class="sr-only">Hakot Day sales history by date and time slot</caption><thead><tr>';
   h+=sortTh('date','Date',st,a,'l frz solo',' rowspan="2"')+sortTh('status','Status',st,a,'l',' rowspan="2"')+sortTh('ly','Sales LY',st,a,'',' rowspan="2"')+sortTh('trxLy','TRX LY',st,a,'',' rowspan="2"');
-  h+='<th scope="colgroup" colspan="3" class="gs">Running</th>'+wh[0]+'</tr><tr class="r2">'+sortTh('latest','Latest',st,a,'gs')+sortTh('sofar','Sales so far',st,a)+sortTh('vs','VS LY so far',st,a)+wh[1]+'</tr></thead><tbody>';
+  h+='<th scope="colgroup" colspan="4" class="gs">Day total</th>'+wh[0]+'</tr><tr class="r2">'+sortTh('latest','Latest slot',st,a,'gs')+sortTh('sofar','Total sales',st,a)+sortTh('sotrx','Total TRX',st,a)+sortTh('vs','VS LY',st,a)+wh[1]+'</tr></thead><tbody>';
   rows.forEach(function(x){
-    h+='<tr class="clickable'+(x.r.date===S.date?' cur':'')+'" data-act="pickDate" data-d="'+esc(x.r.date)+'" tabindex="0" aria-label="Open '+esc(fmtDate(x.r.date))+'"><td class="l frz solo">'+esc(fmtDateShort(x.r.date))+'</td><td class="l">'+statusBadge(x.status)+'</td><td>'+money(x.r.ly)+'</td><td>'+int(x.r.trxLy)+'</td><td class="gs">'+slotBadge(x.l)+'</td><td>'+(x.l?money(x.l.sales):'')+'</td><td>'+vsCell(x.vs)+'</td>'+recWinCells(x.r)+'</tr>';
+    h+='<tr class="clickable'+(x.r.date===S.date?' cur':'')+'" data-act="pickDate" data-d="'+esc(x.r.date)+'" tabindex="0" aria-label="Open '+esc(fmtDate(x.r.date))+'"><td class="l frz solo">'+esc(fmtDateShort(x.r.date))+'</td><td class="l">'+statusBadge(x.status)+'</td><td>'+money(x.r.ly)+'</td><td>'+int(x.r.trxLy)+'</td><td class="gs">'+slotBadge(x.l)+'</td><td>'+(x.l?money(x.l.sales):'')+'</td><td>'+(x.l?int(x.l.trx):'')+'</td><td>'+vsCell(x.vs)+'</td>'+recWinCells(x.r)+'</tr>';
   });
   el.innerHTML=h+'</tbody></table></div><div class="table-foot"><span>Select a row to open that date in Encode Sales.</span><span>Showing '+rows.length+' of '+total+'</span></div>';
 }
 function exportHist(){
   var rows=sortRows(histRows(),S.hsort);if(!rows.length){toast('Nothing to export for the current search.','warning');return}
-  var out=[csvHead(['Date','Store ID','Store','Status','Sales LY','TRX LY','Latest slot','Sales so far','VS LY so far %'])];
-  rows.forEach(function(x){out.push([x.r.date,x.r.storeId,x.r.storeName,STORE_STATUS[x.status].l,x.r.ly,x.r.trxLy,x.l?x.l.l:'',x.l?x.l.sales:'',x.vs==null?'':(x.vs*100).toFixed(2)].concat(csvWins(x.r)))});
+  var out=[csvHead(['Date','Store ID','Store','Status','Sales LY','TRX LY','Latest slot','Total sales','Total TRX','VS LY total %'])];
+  rows.forEach(function(x){out.push([x.r.date,x.r.storeId,x.r.storeName,STORE_STATUS[x.status].l,x.r.ly,x.r.trxLy,x.l?x.l.l:'',x.l?x.l.sales:'',x.l?x.l.trx:'',x.vs==null?'':(x.vs*100).toFixed(2)].concat(csvWins(x.r)))});
   downloadCsv('hakot-day-history-'+S.me.storeId+'.csv',out);
 }
 
@@ -1608,7 +1627,7 @@ function renderDashBody(){
   var stores=filteredStores();
   if(!stores.length){el.innerHTML='<div class="card">'+stateBlock('filter','No stores match the selected filters','Try a different area, status, or search term.','<button class="btn" data-act="clear-filters">'+icon('x')+'Clear filters</button>')+'</div>';return}
   var h='<div class="kpis" id="kpis" role="region" aria-label="Key figures"></div><div class="grid-charts">';
-  h+='<section class="card chart" id="chRank" aria-labelledby="chRank-t"><div class="card-h"><div><h2 class="card-t" id="chRank-t">VS LY by store</h2><div class="card-s">Sales so far as a share of LY full-day sales · ranked</div></div></div><div class="card-b"><div class="plot plot-scroll"></div></div><div class="ctip" role="tooltip"></div></section>';
+  h+='<section class="card chart" id="chRank" aria-labelledby="chRank-t"><div class="card-h"><div><h2 class="card-t" id="chRank-t">VS LY by store</h2><div class="card-s">Day total as a share of LY full-day sales · ranked</div></div></div><div class="card-b"><div class="plot plot-scroll"></div></div><div class="ctip" role="tooltip"></div></section>';
   h+='<section class="card chart" id="chRep" aria-labelledby="chRep-t"><div class="card-h"><div><h2 class="card-t" id="chRep-t">Reporting by time slot</h2><div class="card-s">Stores that have encoded each slot</div></div></div><div class="card-b"><div class="plot"></div></div><div class="ctip" role="tooltip"></div></section></div>';
   h+='<section class="card"><div class="card-h toolbar"><div><h2 class="card-t">Store detail</h2><div class="card-s" id="dashCount"></div></div><div class="tools">'+densityBtn()+colsMenu(true)+'</div></div><div id="dashTable"></div></section>';
   el.innerHTML=h;
@@ -1620,9 +1639,9 @@ function renderDashKpis(stores){
   stores.forEach(function(s){var r=byId[s.id],l=latest(r);if(!l)return;started++;if(r.w.FINAL.sales!=='')finals++;sales+=l.sales;trx+=l.trx||0;
     if(r.ly>0){salesLyBase+=l.sales;ly+=r.ly}if(r.trxLy>0){trxBase+=l.trx||0;trxLy+=r.trxLy}if(r.ly>0&&r.trxLy>0){bLy+=r.ly;bTrxLy+=r.trxLy}});
   var vs=ly>0?salesLyBase/ly:null,bk=trx>0?sales/trx:null,bkLy=bTrxLy>0?bLy/bTrxLy:null;
-  var h=kpi({label:'Sales so far',value:started?cpeso(sales):'—',title:started?peso(sales):'',foot:started?started+' store'+(started===1?'':'s')+' reporting':'No store has encoded yet'});
-  h+=kpi({label:'VS LY so far',value:vs==null?'—':pct(vs),meter:vs==null?'':meterHtml(vs,'Sales so far as percent of last year full-day sales'),foot:vs==null?'Needs LY and at least one slot':(vs>=1?'<span class="badge success">'+icon('check')+'Ahead of LY</span>':'<span>'+cpeso(ly-salesLyBase)+' to match LY</span>')});
-  h+=kpi({label:'Transactions',value:started?int(trx):'—',foot:trxLy>0?'<span>'+pct(trxBase/trxLy)+' of LY TRX</span>':'LY TRX not available'});
+  var h=kpi({label:'Total sales',value:started?cpeso(sales):'—',title:started?peso(sales):'',foot:started?started+' store'+(started===1?'':'s')+' reporting':'No store has encoded yet'});
+  h+=kpi({label:'VS LY (total)',value:vs==null?'—':pct(vs),meter:vs==null?'':meterHtml(vs,'Day total as percent of last year full-day sales'),foot:vs==null?'Needs LY and at least one slot':(vs>=1?'<span class="badge success">'+icon('check')+'Ahead of LY</span>':'<span>'+cpeso(ly-salesLyBase)+' to match LY</span>')});
+  h+=kpi({label:'Total transactions',value:started?int(trx):'—',foot:trxLy>0?'<span>'+pct(trxBase/trxLy)+' of LY TRX</span>':'LY TRX not available'});
   h+=kpi({label:'Basket size',value:bk==null?'—':peso(bk),foot:bk!=null&&bkLy!=null?deltaHtml(bk/bkLy-1,'vs LY '+peso(bkLy)):'LY basket not available'});
   h+=kpi({label:'Reporting',value:started+' / '+n,meter:meterHtml(n?started/n:0,'Stores reporting'),foot:'<span>'+finals+' final submitted</span>'});
   el.innerHTML=h;
@@ -1639,12 +1658,12 @@ function renderDashTable(stores){
   var el=$('dashTable');if(!el)return;
   var byId=byIdMap(),rows=stores.map(function(s){return rowOf(s,byId[s.id])}),st=S.sort,a='sort';
   $('dashCount').textContent=stores.length+' store'+(stores.length===1?'':'s')+' · '+rows.filter(function(x){return x.has}).length+' with entries';
-  var ws=visWins(),ms=visMets(),ncols=7+(ms.length?ws.length*ms.length:0),wh=winHeads(st,a);
+  var ws=visWins(),ms=visMets(),ncols=9+(ms.length?ws.length*ms.length:0),wh=winHeads(st,a);
   var h='<div class="table-wrap"><table class="dt'+(PREF.density==='compact'?' dense':'')+'"><caption class="sr-only">Store sales by time slot for '+esc(fmtDate(S.date))+'</caption><thead><tr>';
   h+=sortTh('id','ID',st,a,'l frz c-id',' rowspan="2"')+sortTh('name','Store',st,a,'l frz2',' rowspan="2"')+sortTh('status','Status',st,a,'l',' rowspan="2"')+sortTh('ly','Sales LY',st,a,'',' rowspan="2"')+sortTh('trxLy','TRX LY',st,a,'',' rowspan="2"');
-  h+='<th scope="colgroup" colspan="3" class="gs">Running</th>'+wh[0]+'</tr><tr class="r2">'+sortTh('latest','Latest',st,a,'gs')+sortTh('sofar','Sales so far',st,a)+sortTh('vs','VS LY so far',st,a)+wh[1]+'</tr></thead><tbody>';
-  function rowHtml(x){return '<tr><td class="l frz c-id">'+esc(x.s.id)+'</td><td class="l frz2">'+esc(x.s.name)+(x.s.remarks&&x.s.remarks.toLowerCase()==='new'?' <span class="badge info">New</span>':'')+'</td><td class="l">'+statusBadge(x.status)+'</td><td>'+money(x.r.ly)+'</td><td>'+int(x.r.trxLy)+'</td><td class="gs">'+slotBadge(x.l)+'</td><td>'+(x.l?money(x.l.sales):'')+'</td><td>'+vsCell(x.vs)+'</td>'+recWinCells(x.r)+'</tr>'}
-  function totalHtml(label,list,cls){var recs=list.filter(function(x){return x.has}).map(function(x){return x.r}),g=agg(recs),sf=soFar(recs);return '<tr class="'+cls+'"><td class="l frz c-id"></td><td class="l frz2">'+label+'</td><td></td><td>'+money(g.ly)+'</td><td>'+int(g.trxLy)+'</td><td class="gs"></td><td>'+money(sf.sales)+'</td><td>'+vsCell(sf.vs)+'</td>'+aggWinCells(g)+'</tr>'}
+  h+='<th scope="colgroup" colspan="4" class="gs">Day total</th>'+wh[0]+'</tr><tr class="r2">'+sortTh('latest','Latest slot',st,a,'gs')+sortTh('sofar','Total sales',st,a)+sortTh('sotrx','Total TRX',st,a)+sortTh('vs','VS LY',st,a)+wh[1]+'</tr></thead><tbody>';
+  function rowHtml(x){return '<tr><td class="l frz c-id">'+esc(x.s.id)+'</td><td class="l frz2">'+esc(x.s.name)+(x.s.remarks&&x.s.remarks.toLowerCase()==='new'?' <span class="badge info">New</span>':'')+'</td><td class="l">'+statusBadge(x.status)+'</td><td>'+money(x.r.ly)+'</td><td>'+int(x.r.trxLy)+'</td><td class="gs">'+slotBadge(x.l)+'</td><td>'+(x.l?money(x.l.sales):'')+'</td><td>'+(x.l?int(x.l.trx):'')+'</td><td>'+vsCell(x.vs)+'</td>'+recWinCells(x.r)+'</tr>'}
+  function totalHtml(label,list,cls){var recs=list.filter(function(x){return x.has}).map(function(x){return x.r}),g=agg(recs),sf=soFar(recs);return '<tr class="'+cls+'"><td class="l frz c-id"></td><td class="l frz2">'+label+'</td><td></td><td>'+money(g.ly)+'</td><td>'+int(g.trxLy)+'</td><td class="gs"></td><td>'+money(sf.sales)+'</td><td>'+int(sf.trx)+'</td><td>'+vsCell(sf.vs)+'</td>'+aggWinCells(g)+'</tr>'}
   if(PREF.group){
     scopeAreas().forEach(function(area){
       var list=sortRows(rows.filter(function(x){return x.s.area===area}),st);if(!list.length)return;
@@ -1654,12 +1673,12 @@ function renderDashTable(stores){
     });
   }else sortRows(rows,st).forEach(function(x){h+=rowHtml(x)});
   h+=totalHtml('Grand total',rows,'grand');
-  el.innerHTML=h+'</tbody></table></div><div class="table-foot"><span>Subtotal VS LY compares only stores that reported that slot.</span><span>'+rows.length+' rows</span></div>';
+  el.innerHTML=h+'</tbody></table></div><div class="table-foot"><span>Slot columns show each slot’s own sales; VS LY is the running total through that slot. Subtotals compare only stores that reported the slot.</span><span>'+rows.length+' rows</span></div>';
 }
 function exportDash(){
   var stores=filteredStores(),byId=byIdMap();if(!stores.length){toast('Nothing to export for the current filters.','warning');return}
-  var out=[csvHead(['Date','Area','Store ID','Store','Status','Sales LY','TRX LY','Latest slot','Sales so far','VS LY so far %'])];
-  sortRows(stores.map(function(s){return rowOf(s,byId[s.id])}),S.sort).forEach(function(x){out.push([S.date,x.s.area,x.s.id,x.s.name,STORE_STATUS[x.status].l,x.r.ly,x.r.trxLy,x.l?x.l.l:'',x.l?x.l.sales:'',x.vs==null?'':(x.vs*100).toFixed(2)].concat(csvWins(x.r)))});
+  var out=[csvHead(['Date','Area','Store ID','Store','Status','Sales LY','TRX LY','Latest slot','Total sales','Total TRX','VS LY total %'])];
+  sortRows(stores.map(function(s){return rowOf(s,byId[s.id])}),S.sort).forEach(function(x){out.push([S.date,x.s.area,x.s.id,x.s.name,STORE_STATUS[x.status].l,x.r.ly,x.r.trxLy,x.l?x.l.l:'',x.l?x.l.sales:'',x.l?x.l.trx:'',x.vs==null?'':(x.vs*100).toFixed(2)].concat(csvWins(x.r)))});
   downloadCsv('hakot-day-'+S.date+'.csv',out);
 }
 
@@ -1742,9 +1761,6 @@ async function saveWin(btn){
   setErr('fTrx',t===''?'Enter the TRX count.':t<0?'Must be 0 or more.':'');
   if(s===''||s<0){$('fSales').focus();return}
   if(t===''||t<0){$('fTrx').focus();return}
-  var p=prevSaved(rec,k),q=laterSaved(rec,k);
-  if(p&&s<p.sales&&!(await confirmDialog({title:'Sales lower than '+winLabel(p.k)+'?',html:'<b>'+peso(s)+'</b> is lower than the '+esc(winLabel(p.k))+' entry (<b>'+peso(p.sales)+'</b>). Sales are a running total for the day.',ok:'Save anyway'})))return;
-  if(q&&s>q.sales&&!(await confirmDialog({title:'Sales higher than '+winLabel(q.k)+'?',html:'<b>'+peso(s)+'</b> is higher than the later '+esc(winLabel(q.k))+' entry (<b>'+peso(q.sales)+'</b>).',ok:'Save anyway'})))return;
   if(rec&&rec.w[k].sales!==''&&!(await confirmDialog({title:'Update the '+winLabel(k)+' entry?',html:'This replaces the saved entry of <b>'+peso(rec.w[k].sales)+'</b> and <b>'+int(rec.w[k].trx)+'</b> transactions.',ok:'Update entry',tone:'info'})))return;
   await withBusy(btn,async function(){
     var j=await api('/api/save',{date:S.date,storeId:S.store,window:{key:k,sales:s,trx:t}});
