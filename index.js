@@ -719,7 +719,7 @@ const PAGE = String.raw`<!DOCTYPE html>
   --nav-bg:#0e2a1b;--nav-text:#cfe1d5;--nav-muted:#8eab99;--nav-hover:rgba(255,255,255,.06);--nav-active:rgba(255,255,255,.11);--nav-accent:#4ade80;--nav-line:rgba(255,255,255,.07);
   --success:#15803d;--success-bg:#e7f5ec;--danger:#b91c1c;--danger-bg:#fdecec;--warning:#a16207;--warning-bg:#fdf4e1;--info:#1d4ed8;--info-bg:#eaf0fd;--neutral:#4b5563;--neutral-bg:#eef1f5;
   --series:#15803d;--series-wash:rgba(21,128,61,.10);--track:#d5ebdc;--grid:#e7ede9;--axis:#c2ccc5;--good-fill:#15803d;
-  --group:#f1f5f2;--total:#f7faf8;--hover:#f4f8f5;--sel:#eaf5ee;
+  --group:#f1f5f2;--total:#f7faf8;--hover:#f4f8f5;--sel:#eaf5ee;--mx1:#eef7f1;--mx2:#d3ecdc;--mx3:#a9dcbb;
   --shadow-1:0 1px 2px rgba(16,24,40,.05);--shadow-2:0 4px 12px rgba(16,24,40,.08),0 1px 3px rgba(16,24,40,.06);--shadow-3:0 18px 44px rgba(16,24,40,.20);
   --ring:0 0 0 3px rgba(22,101,52,.30);
   --skel:#e6ece8;--skel-hi:#f3f7f4;
@@ -734,7 +734,7 @@ const PAGE = String.raw`<!DOCTYPE html>
   --nav-bg:#07130c;--nav-text:#c3d6c9;--nav-muted:#7f9a89;--nav-hover:rgba(255,255,255,.05);--nav-active:rgba(255,255,255,.09);--nav-accent:#4ade80;--nav-line:rgba(255,255,255,.06);
   --success:#4ade80;--success-bg:rgba(34,197,94,.14);--danger:#f87171;--danger-bg:rgba(239,68,68,.14);--warning:#fbbf24;--warning-bg:rgba(245,158,11,.14);--info:#60a5fa;--info-bg:rgba(59,130,246,.15);--neutral:#b3bfcd;--neutral-bg:rgba(148,163,184,.13);
   --series:#22a05a;--series-wash:rgba(34,160,90,.16);--track:#1c3526;--grid:#212c26;--axis:#384a3f;--good-fill:#22a05a;
-  --group:#19221d;--total:#171f1a;--hover:#1b2520;--sel:#1a2b21;
+  --group:#19221d;--total:#171f1a;--hover:#1b2520;--sel:#1a2b21;--mx1:#18281e;--mx2:#1d3d29;--mx3:#245a39;
   --shadow-1:0 1px 2px rgba(0,0,0,.3);--shadow-2:0 4px 14px rgba(0,0,0,.35);--shadow-3:0 18px 44px rgba(0,0,0,.55);
   --ring:0 0 0 3px rgba(74,222,128,.40);
   --skel:#1d2621;--skel-hi:#27322b;
@@ -750,7 +750,7 @@ const PAGE = String.raw`<!DOCTYPE html>
     --nav-bg:#07130c;--nav-text:#c3d6c9;--nav-muted:#7f9a89;--nav-hover:rgba(255,255,255,.05);--nav-active:rgba(255,255,255,.09);--nav-accent:#4ade80;--nav-line:rgba(255,255,255,.06);
     --success:#4ade80;--success-bg:rgba(34,197,94,.14);--danger:#f87171;--danger-bg:rgba(239,68,68,.14);--warning:#fbbf24;--warning-bg:rgba(245,158,11,.14);--info:#60a5fa;--info-bg:rgba(59,130,246,.15);--neutral:#b3bfcd;--neutral-bg:rgba(148,163,184,.13);
     --series:#22a05a;--series-wash:rgba(34,160,90,.16);--track:#1c3526;--grid:#212c26;--axis:#384a3f;--good-fill:#22a05a;
-    --group:#19221d;--total:#171f1a;--hover:#1b2520;--sel:#1a2b21;
+    --group:#19221d;--total:#171f1a;--hover:#1b2520;--sel:#1a2b21;--mx1:#18281e;--mx2:#1d3d29;--mx3:#245a39;
     --shadow-1:0 1px 2px rgba(0,0,0,.3);--shadow-2:0 4px 14px rgba(0,0,0,.35);--shadow-3:0 18px 44px rgba(0,0,0,.55);
     --ring:0 0 0 3px rgba(74,222,128,.40);
     --skel:#1d2621;--skel-hi:#27322b;
@@ -1083,6 +1083,20 @@ td.wrap{white-space:normal;min-width:200px;max-width:340px}
 .lock-note{display:flex;gap:10px;align-items:center;padding:14px 16px;color:var(--text-2);font-size:13.5px}
 .lock-note .ic{width:18px;height:18px;color:var(--text-3)}
 .over{color:var(--danger);font-weight:600}
+.mxt th.mx-h{white-space:normal;min-width:84px;max-width:104px;font-size:11.5px;line-height:1.25;text-align:center;vertical-align:bottom}
+.mxt td.mx{text-align:center;min-width:84px;padding:6px 8px}
+.mx-v{display:block;font-variant-numeric:tabular-nums}
+.mx-p{display:block;font-size:11px;color:var(--text-3)}
+.mx-0{background:var(--surface)!important}
+.mx-1{background:var(--mx1)!important}
+.mx-2{background:var(--mx2)!important}
+.mx-3{background:var(--mx3)!important}
+.mx-3 .mx-p{color:var(--success);font-weight:700}
+.mx-na{background:var(--surface-2)!important}
+.mx-legend{display:flex;flex-wrap:wrap;gap:6px 16px;align-items:center;padding:10px 16px;font-size:12px;color:var(--text-2);border-bottom:1px solid var(--border)}
+.mx-legend span{display:inline-flex;align-items:center;gap:6px}
+.mx-legend .sw{width:14px;height:14px;border-radius:3px;border:1px solid var(--border-strong);display:inline-block}
+.mx-legend .sw.mx-na{border-style:dashed}
 @media (max-width:640px){.qty-in{width:76px;height:40px}}
 .td-actions{display:flex;gap:6px;justify-content:flex-end}
 .table-foot{display:flex;justify-content:space-between;gap:12px;padding:10px 16px;font-size:12.5px;color:var(--text-3);border-top:1px solid var(--border);flex-wrap:wrap}
@@ -1219,7 +1233,7 @@ var S={
   f:{q:'',areas:[],status:'all'},sort:{key:'',dir:1},
   histQ:'',hsort:{key:'date',dir:-1},
   userTab:'',userQ:'',usort:{key:'',dir:1},
-  wl:{date:null,items:[],rows:[],loading:false,error:null},wlWin:null,wlEdit:false,wlTab:'item',wlSort:{key:'',dir:1}
+  wl:{date:null,items:[],rows:[],loading:false,error:null},wlWin:null,wlEdit:false,wlTab:'matrix',wlSort:{key:'',dir:1}
 };
 
 /* ================= Helpers ================= */
@@ -2010,11 +2024,37 @@ function renderWlViewerBody(){
   var reporting=Object.keys(byStore).length;
   var h='<div class="kpis">'+kpi({label:'Total allocation',value:cs(tA),foot:S.wl.items.length+' items'})+kpi({label:'Total sold',value:cs(tS),foot:tA>0?'<span>'+cs(Math.max(0,tA-tS))+' remaining</span>':'—'})+kpi({label:'Sell-through',value:tA>0?pct(tS/tA):'—',meter:tA>0?meterHtml(tS/tA,'Cases sold as percent of allocation'):'',foot:'Sold ÷ allocation'})+kpi({label:'Stores reporting',value:reporting+' / '+stores.length,meter:meterHtml(stores.length?reporting/stores.length:0,'Stores with allocation encoded'),foot:'Allocation encoded'})+'</div>';
   function tab(k,l){return '<button class="tab" role="tab" aria-selected="'+(S.wlTab===k)+'" data-act="wl-tab" data-t="'+k+'">'+l+'</button>'}
-  h+='<section class="card"><div class="card-h toolbar tabs-bar"><div class="tabs" role="tablist" aria-label="Totals view">'+tab('item','By item')+tab('store','By store')+'</div><div class="tools" style="padding:8px 0">'+densityBtn()+'</div></div>';
+  h+='<section class="card"><div class="card-h toolbar tabs-bar"><div class="tabs" role="tablist" aria-label="Totals view">'+tab('matrix','Store × item')+tab('item','By item')+tab('store','By store')+'</div><div class="tools" style="padding:8px 0">'+densityBtn()+'</div></div>';
   var st=S.wlSort,a='wl-sort',d=PREF.density==='compact'?' dense':'';
   function sortList(list,get){if(!st.key)return list;return list.slice().sort(function(x,y){var p=get(x,st.key),q=get(y,st.key);return (p<q?-1:p>q?1:0)*st.dir})}
   function val(o,k){return k==='name'?o.name.toLowerCase():k==='a'?o.a:k==='s'?o.s:k==='p'?(o.a>0?o.s/o.a:-1):0}
-  if(S.wlTab==='item'){
+  if(S.wlTab==='matrix'){
+    // Store x item status: each cell = sold / allocated with sell-through, shaded by status.
+    var cell={};rows.forEach(function(r){(cell[r.storeId]||(cell[r.storeId]={}))[r.item]=r});
+    var its=S.wl.items,itT={};its.forEach(function(it){itT[it]={a:0,s:0}});
+    function mcell(r){
+      if(!r||r.alloc==='')return '<td class="mx mx-na"><span class="muted">—</span></td>';
+      var sd=wlSold(r),a=r.alloc,p=a>0?sd/a:null,c=a===0?'mx-0':sd===0?'mx-0':p>=1?'mx-3':p>=0.5?'mx-2':'mx-1';
+      return '<td class="mx '+c+'" title="'+esc(r.item)+': '+sd+' of '+a+' cs'+(p==null?'':' ('+pct(p)+')')+'"><span class="mx-v"><b class="'+(sd>a?'over':'')+'">'+sd+'</b><span class="muted">/'+a+'</span></span><span class="mx-p">'+(p==null?'—':Math.round(p*100)+'%')+'</span></td>';
+    }
+    h+='<div class="mx-legend" aria-label="Legend"><span><i class="sw mx-3"></i>Sold out (100%+)</span><span><i class="sw mx-2"></i>50–99%</span><span><i class="sw mx-1"></i>1–49%</span><span><i class="sw mx-0"></i>No sales yet</span><span><i class="sw mx-na"></i>No allocation</span><span class="muted">Cell = cases sold / allocated</span></div>';
+    h+='<div class="table-wrap"><table class="dt mxt'+d+'"><caption class="sr-only">Cases sold versus allocation by store and item</caption><thead><tr><th scope="col" class="l frz c-id">ID</th><th scope="col" class="l frz2">Store</th>';
+    its.forEach(function(it){h+='<th scope="col" class="mx-h" title="'+esc(it)+'">'+esc(it)+'</th>'});
+    h+='<th scope="col" class="gs">Total</th><th scope="col">Sell-through</th></tr></thead><tbody>';
+    scopeAreas().forEach(function(area){
+      var grp=stores.filter(function(s){return s.area===area});if(!grp.length)return;
+      h+='<tr class="group"><td colspan="'+(its.length+4)+'"><span class="glabel">'+esc(area)+'<span class="muted">'+grp.length+' store'+(grp.length===1?'':'s')+'</span></span></td></tr>';
+      grp.forEach(function(st){
+        var m=cell[st.id]||{},ta=0,ts=0,has=false;
+        h+='<tr><td class="l frz c-id">'+esc(st.id)+'</td><td class="l frz2">'+esc(st.name)+'</td>';
+        its.forEach(function(it){var r=m[it];h+=mcell(r);if(r&&r.alloc!==''){has=true;ta+=r.alloc;var sd=wlSold(r);ts+=sd;itT[it].a+=r.alloc;itT[it].s+=sd}});
+        h+='<td class="gs">'+(has?'<b>'+ts+'</b><span class="muted">/'+ta+'</span>':'<span class="badge">No allocation</span>')+'</td><td>'+(has?stCell(ts,ta):'<span class="muted">—</span>')+'</td></tr>';
+      });
+    });
+    h+='<tr class="grand"><td class="l frz c-id"></td><td class="l frz2">Total</td>';
+    its.forEach(function(it){var t=itT[it];h+='<td>'+(t.a?t.s+'<span class="muted">/'+t.a+'</span><div class="mx-p">'+Math.round(t.s/t.a*100)+'%</div>':'')+'</td>'});
+    h+='<td class="gs">'+tS+'<span class="muted">/'+tA+'</span></td><td>'+stCell(tS,tA)+'</td></tr></tbody></table></div>';
+  }else if(S.wlTab==='item'){
     var list=sortList(S.wl.items.map(function(it){return byItem[it]}),val);
     h+='<div class="table-wrap"><table class="dt'+d+'"><caption class="sr-only">Allocation vs sold by item</caption><thead><tr>'+sortTh('name','Item',st,a,'l')+'<th scope="col">Stores</th>'+sortTh('a','Allocation (cs)',st,a)+sortTh('s','Sold (cs)',st,a)+sortTh('p','Sell-through',st,a)+'</tr></thead><tbody>';
     list.forEach(function(o){h+='<tr><td class="l item">'+esc(o.name)+'</td><td>'+o.n+'</td><td>'+int(o.a)+'</td><td>'+int(o.s)+'</td><td>'+stCell(o.s,o.a)+'</td></tr>'});
