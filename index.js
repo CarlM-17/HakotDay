@@ -1498,7 +1498,7 @@ function renderStoreKpis(){
   }
   var tot=latest(rec);
   var h=kpi({label:'Total sales',value:peso(tot.sales),foot:tot.n+' of '+WINS.length+' slots · latest '+esc(SHORT[tot.k]),spark:sparkline(pts.map(function(p){return p.cum}))});
-  if(ly>0){var p=tot.sales/ly,gap=ly-tot.sales;h+=kpi({label:'VS LY · full day',value:pct(p),meter:meterHtml(p,'Percent of last year full-day sales'),foot:p>=1?'<span class="badge success">'+icon('check')+'Beat LY</span><span>by '+peso(-gap)+'</span>':'<span>'+peso(gap)+' to match LY</span>'})}
+  if(ly>0){var p=tot.sales/ly,gap=ly-tot.sales;h+=kpi({label:'VS LY · full day',value:pct(p),meter:meterHtml(p,'Percent of last year full-day sales'),foot:'<span>LY '+cpeso(ly)+'</span>'+(p>=1?'<span class="badge success">'+icon('check')+'Beat LY</span><span>by '+peso(-gap)+'</span>':'<span>· '+peso(gap)+' to go</span>')})}
   else h+=kpi({label:'VS LY · full day',value:'—',foot:'Enter last year to compare'});
   h+=kpi({label:'Total transactions',value:int(tot.trx),foot:trxLy>0?'<span>'+pct(tot.trx/trxLy)+' of LY ('+int(trxLy)+')</span>':'LY TRX not set'});
   var bk=tot.trx>0?tot.sales/tot.trx:null,bkLy=ly>0&&trxLy>0?ly/trxLy:null;
@@ -1794,7 +1794,7 @@ function renderDashKpis(stores){
     if(r.ly>0){salesLyBase+=l.sales;ly+=r.ly}if(r.trxLy>0){trxBase+=l.trx||0;trxLy+=r.trxLy}if(r.ly>0&&r.trxLy>0){bLy+=r.ly;bTrxLy+=r.trxLy}});
   var vs=ly>0?salesLyBase/ly:null,bk=trx>0?sales/trx:null,bkLy=bTrxLy>0?bLy/bTrxLy:null;
   var h=kpi({label:'Total sales',value:started?cpeso(sales):'—',title:started?peso(sales):'',foot:started?started+' store'+(started===1?'':'s')+' reporting':'No store has encoded yet'});
-  h+=kpi({label:'VS LY (total)',value:vs==null?'—':pct(vs),meter:vs==null?'':meterHtml(vs,'Day total as percent of last year full-day sales'),foot:vs==null?'Needs LY and at least one slot':(vs>=1?'<span class="badge success">'+icon('check')+'Ahead of LY</span>':'<span>'+cpeso(ly-salesLyBase)+' to match LY</span>')});
+  h+=kpi({label:'VS LY (total)',value:vs==null?'—':pct(vs),meter:vs==null?'':meterHtml(vs,'Day total as percent of last year full-day sales'),title:vs==null?'':peso(salesLyBase)+' of LY '+peso(ly),foot:vs==null?'Needs LY and at least one slot':'<span>'+cpeso(salesLyBase)+' of LY '+cpeso(ly)+'</span>'+(vs>=1?'<span class="badge success">'+icon('check')+'Ahead of LY</span>':'<span>· '+cpeso(ly-salesLyBase)+' to go</span>')});
   h+=kpi({label:'Total transactions',value:started?int(trx):'—',foot:trxLy>0?'<span>'+pct(trxBase/trxLy)+' of LY TRX</span>':'LY TRX not available'});
   h+=kpi({label:'Basket size',value:bk==null?'—':peso(bk),foot:bk!=null&&bkLy!=null?deltaHtml(bk/bkLy-1,'vs LY '+peso(bkLy)):'LY basket not available'});
   h+=kpi({label:'Reporting',value:started+' / '+n,meter:meterHtml(n?started/n:0,'Stores reporting'),foot:'<span>'+finals+' final submitted</span>'});
