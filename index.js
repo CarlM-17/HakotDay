@@ -1097,6 +1097,19 @@ td.wrap{white-space:normal;min-width:200px;max-width:340px}
 .mx-legend span{display:inline-flex;align-items:center;gap:6px}
 .mx-legend .sw{width:14px;height:14px;border-radius:3px;border:1px solid var(--border-strong);display:inline-block}
 .mx-legend .sw.mx-na{border-style:dashed}
+.snap{position:fixed;left:-20000px;top:0;background:#ffffff;padding:24px;width:max-content;z-index:-1}
+.snap .snap-head{display:flex;align-items:center;gap:12px;margin-bottom:6px}
+.snap .snap-head img{width:40px;height:40px}
+.snap .snap-title{font-size:20px;font-weight:700;color:#1f2937}
+.snap .snap-sub{font-size:13px;color:#4b5563}
+.snap .table-wrap{max-height:none!important;overflow:visible!important}
+.snap .dt .frz,.snap .dt .frz2,.snap .dt thead th{position:static!important}
+.snap .dt .frz,.snap .dt .frz2{box-shadow:none!important}
+.snap .dt .frz2{border-right:1px solid var(--border)}
+.snap .dt tr.group .glabel{position:static!important}
+.snap .card{box-shadow:none}
+.snap .sort .sort-ic{display:none}
+.snap .snap-foot{margin-top:10px;font-size:11.5px;color:#6b7280}
 @media (max-width:640px){.qty-in{width:76px;height:40px}}
 .td-actions{display:flex;gap:6px;justify-content:flex-end}
 .table-foot{display:flex;justify-content:space-between;gap:12px;padding:10px 16px;font-size:12.5px;color:var(--text-3);border-top:1px solid var(--border);flex-wrap:wrap}
@@ -1213,6 +1226,7 @@ var IC={
   filter:'<path d="M22 3H2l8 9.46V19l4 2v-8.54z"/>',
   wine:'<path d="M8 22h8"/><path d="M7 10h10"/><path d="M12 15v7"/><path d="M12 15a5 5 0 0 0 5-5c0-2-.5-4-2-8H9c-1.5 4-2 6-2 8a5 5 0 0 0 5 5Z"/>',
   lock:'<rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  image:'<rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.09-3.09a2 2 0 0 0-2.82 0L6 21"/>',
   store:'<path d="m2 7 4.41-4.41A2 2 0 0 1 7.83 2h8.34a2 2 0 0 1 1.42.59L22 7"/><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="M2 7h20"/><path d="M22 7v3a2 2 0 0 1-2 2 2.7 2.7 0 0 1-2-.9 2.7 2.7 0 0 1-2 .9 2.7 2.7 0 0 1-2-.9 2.7 2.7 0 0 1-2 .9 2.7 2.7 0 0 1-2-.9 2.7 2.7 0 0 1-2 .9 2.7 2.7 0 0 1-2-.9A2 2 0 0 1 2 10V7"/>'
 };
 var BRAND='<img class="brand-mark" src="/favicon-64.png" width="32" height="32" alt="" aria-hidden="true">';
@@ -2024,7 +2038,7 @@ function renderWlViewerBody(){
   var reporting=Object.keys(byStore).length;
   var h='<div class="kpis">'+kpi({label:'Total allocation',value:cs(tA),foot:S.wl.items.length+' items'})+kpi({label:'Total sold',value:cs(tS),foot:tA>0?'<span>'+cs(Math.max(0,tA-tS))+' remaining</span>':'—'})+kpi({label:'Sell-through',value:tA>0?pct(tS/tA):'—',meter:tA>0?meterHtml(tS/tA,'Cases sold as percent of allocation'):'',foot:'Sold ÷ allocation'})+kpi({label:'Stores reporting',value:reporting+' / '+stores.length,meter:meterHtml(stores.length?reporting/stores.length:0,'Stores with allocation encoded'),foot:'Allocation encoded'})+'</div>';
   function tab(k,l){return '<button class="tab" role="tab" aria-selected="'+(S.wlTab===k)+'" data-act="wl-tab" data-t="'+k+'">'+l+'</button>'}
-  h+='<section class="card"><div class="card-h toolbar tabs-bar"><div class="tabs" role="tablist" aria-label="Totals view">'+tab('matrix','Store × item')+tab('item','By item')+tab('store','By store')+'</div><div class="tools" style="padding:8px 0">'+densityBtn()+'</div></div>';
+  h+='<section class="card"><div class="card-h toolbar tabs-bar"><div class="tabs" role="tablist" aria-label="Totals view">'+tab('matrix','Store × item')+tab('item','By item')+tab('store','By store')+'</div><div class="tools" style="padding:8px 0">'+densityBtn()+'<button class="btn btn-sm" data-act="wl-xlsx" title="Download this view as a formatted Excel file">'+icon('download')+'Excel</button><button class="btn btn-sm" data-act="wl-png" title="Download this view as an image">'+icon('image')+'PNG</button></div></div>';
   var st=S.wlSort,a='wl-sort',d=PREF.density==='compact'?' dense':'';
   function sortList(list,get){if(!st.key)return list;return list.slice().sort(function(x,y){var p=get(x,st.key),q=get(y,st.key);return (p<q?-1:p>q?1:0)*st.dir})}
   function val(o,k){return k==='name'?o.name.toLowerCase():k==='a'?o.a:k==='s'?o.s:k==='p'?(o.a>0?o.s/o.a:-1):0}
@@ -2081,6 +2095,127 @@ function exportWl(){
   var out=[['Date','Area','Store ID','Store','Item','Allocation (cs)'].concat(WINS.map(function(w){return (w.k==='FINAL'?'Final':w.l)+' (cs)'}),['Total sold (cs)','Sell-through %'])];
   rows.forEach(function(r){var sd=wlSold(r);out.push([r.date,r.area,r.storeId,r.storeName,r.item,r.alloc].concat(WINS.map(function(w){return r.q[w.k]}),[sd,r.alloc>0?(sd/r.alloc*100).toFixed(2):'']))});
   downloadCsv('wines-liquor-'+S.date+(isViewer()?'':'-'+S.me.storeId)+'.csv',out);
+}
+
+/* ---- W&L exports: Excel (formatted .xlsx via ExcelJS) and PNG (html2canvas) ---- */
+var LIBS={};
+function loadLib(src,globalName){
+  if(window[globalName])return Promise.resolve(window[globalName]);
+  if(LIBS[src])return LIBS[src];
+  LIBS[src]=new Promise(function(res,rej){var sc=document.createElement('script');sc.src=src;sc.async=true;sc.onload=function(){window[globalName]?res(window[globalName]):rej(new Error('Library failed to load'))};sc.onerror=function(){delete LIBS[src];rej(new Error('Could not download the export library. Check your connection and try again.'))};document.head.appendChild(sc)});
+  return LIBS[src];
+}
+function wlViewName(){return S.wlTab==='matrix'?'Store x Item':S.wlTab==='item'?'By Item':'By Store'}
+function wlExportName(ext){return 'wines-liquor-'+wlViewName().toLowerCase().replace(/[^a-z]+/g,'-')+'-'+S.date+'.'+ext}
+function wlExportSubtitle(){
+  var scope=S.me.scope?myStores().length+' stores in scope':'All stores',f=[];
+  if(S.f.areas.length)f.push('Area: '+S.f.areas.join(', '));if(S.f.q.trim())f.push('Search: '+S.f.q.trim());
+  return scope+' · '+fmtDate(S.date)+' · quantities in cases'+(f.length?' · '+f.join(' · '):'');
+}
+async function busyExport(btn,label,fn){
+  if(btn.disabled)return;var old=btn.innerHTML;btn.disabled=true;btn.innerHTML='<span class="spinner" aria-hidden="true"></span>'+label;
+  try{await fn()}catch(e){toast(e.message||'Export failed','error')}finally{btn.disabled=false;btn.innerHTML=old}
+}
+function wlTableEl(){return document.querySelector('#wlBody table.dt')}
+
+// Light-theme colours so the file looks the same regardless of the viewer's theme.
+var XL={head:'F7FAF8',headText:'4B5563',group:'F1F5F2',sub:'F7FAF8',grand:'EDF2EE',mx1:'EEF7F1',mx2:'D3ECDC',mx3:'A9DCBB',na:'F7FAF8',border:'E1E8E3',text:'1F2937',muted:'6B7280',red:'B91C1C',green:'15803D',title:'0E2A1B'};
+function cellText(td){
+  // sell-through cells hold a bar + label: keep only the % text; matrix cells: "sold/alloc" + newline + "%"
+  var mv=td.querySelector('.mx-v');if(mv){var pp=td.querySelector('.mx-p');return mv.textContent.trim()+(pp?'\n'+pp.textContent.trim():'')}
+  var sc=td.querySelector('.st-cell');if(sc)return sc.textContent.trim();
+  var gl=td.querySelector('.glabel');if(gl){var m=gl.querySelector('.muted');return gl.firstChild.textContent.trim()+(m?'  ·  '+m.textContent.trim():'')}
+  var sub=td.querySelector('.mx-p');if(sub){var c=td.cloneNode(true);c.querySelector('.mx-p').remove();return c.textContent.trim()+'\n'+sub.textContent.trim()}
+  var bd=td.querySelector('.badge');if(bd){var cl=td.cloneNode(true);cl.querySelectorAll('.badge').forEach(function(b){b.textContent=' ('+b.textContent.trim()+')'});return cl.textContent.replace(/\s+/g,' ').replace(/ \(/,' (').trim()}
+  return td.textContent.replace(/\s+/g,' ').trim();
+}
+async function exportWlXlsx(btn){
+  var tbl=wlTableEl();if(!tbl){toast('Nothing to export yet.','warning');return}
+  await busyExport(btn,'Excel',async function(){
+    var ExcelJS=await loadLib('https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js','ExcelJS');
+    var wb=new ExcelJS.Workbook();wb.creator='Hakot Day';wb.created=new Date();
+    var ws=wb.addWorksheet(wlViewName().replace(/[^A-Za-z ]/g,''),{views:[{showGridLines:false}]});
+    var heads=Array.prototype.slice.call(tbl.querySelectorAll('thead tr')),body=Array.prototype.slice.call(tbl.querySelectorAll('tbody tr'));
+    var ncol=0;Array.prototype.forEach.call(heads[0].children,function(th){ncol+=+(th.getAttribute('colspan')||1)});
+    var thin={style:'thin',color:{argb:'FF'+XL.border}};
+    function fill(c){return {type:'pattern',pattern:'solid',fgColor:{argb:'FF'+c}}}
+    // Title block
+    ws.mergeCells(1,1,1,ncol);var t=ws.getCell(1,1);t.value='Wines & Liquor · '+wlViewName().replace(' x ',' × ');t.font={bold:true,size:14,color:{argb:'FF'+XL.title}};
+    ws.mergeCells(2,1,2,ncol);var st2=ws.getCell(2,1);st2.value=wlExportSubtitle();st2.font={size:10,color:{argb:'FF'+XL.muted}};
+    var r0=3;
+    if(S.wlTab==='matrix'){
+      var legend=[['Sold out (100%+)',XL.mx3],['50–99%',XL.mx2],['1–49%',XL.mx1],['No sales yet','FFFFFF'],['No allocation',XL.na]];
+      legend.forEach(function(l,i){var c=ws.getCell(3,1+i*2);c.fill=fill(l[1]);c.border={top:thin,left:thin,bottom:thin,right:thin};var d=ws.getCell(3,2+i*2);d.value=l[0];d.font={size:9,color:{argb:'FF'+XL.headText}}});
+      ws.getCell(3,Math.min(ncol,12)).value='Cell = cases sold / allocated';ws.getCell(3,Math.min(ncol,12)).font={size:9,italic:true,color:{argb:'FF'+XL.muted}};
+      r0=4;
+    }
+    var row=r0+1,occupied={};
+    function put(r,c,text,opts){
+      var cell=ws.getCell(r,c);var n=text.replace(/,/g,'');
+      cell.value=(/^-?\d+(\.\d+)?$/.test(n)&&opts.numeric)?+n:text;
+      cell.alignment={vertical:'middle',horizontal:opts.align||'left',wrapText:true};
+      cell.font={bold:!!opts.bold,size:opts.size||10,color:{argb:'FF'+(opts.color||XL.text)}};
+      if(opts.fill)cell.fill=fill(opts.fill);
+      cell.border={top:thin,left:thin,bottom:thin,right:thin};
+      return cell;
+    }
+    // header rows (rowspan / colspan aware)
+    heads.forEach(function(tr){
+      var c=1;
+      Array.prototype.forEach.call(tr.children,function(th){
+        while(occupied[row+':'+c])c++;
+        var cs=+(th.getAttribute('colspan')||1),rs=+(th.getAttribute('rowspan')||1);
+        put(row,c,th.textContent.replace(/\s+/g,' ').trim(),{bold:true,fill:XL.head,color:XL.headText,align:th.classList.contains('l')?'left':'center',size:9.5});
+        if(cs>1||rs>1){ws.mergeCells(row,c,row+rs-1,c+cs-1)}
+        for(var i=0;i<rs;i++)for(var j=0;j<cs;j++)occupied[(row+i)+':'+(c+j)]=1;
+        c+=cs;
+      });
+      ws.getRow(row).height=S.wlTab==='matrix'?42:22;row++;
+    });
+    var headerEnd=row-1;
+    body.forEach(function(tr){
+      var cls=tr.className,base=/group/.test(cls)?XL.group:/grand/.test(cls)?XL.grand:/sub/.test(cls)?XL.sub:null,bold=!!base,c=1,multi=false;
+      Array.prototype.forEach.call(tr.children,function(td){
+        var cs=+(td.getAttribute('colspan')||1),txt=cellText(td),f=base;
+        if(td.classList.contains('mx-1'))f=XL.mx1;else if(td.classList.contains('mx-2'))f=XL.mx2;else if(td.classList.contains('mx-3'))f=XL.mx3;else if(td.classList.contains('mx-na'))f=XL.na;
+        var over=!!td.querySelector('.over'),isL=td.classList.contains('l')||cs>1;
+        if(txt.indexOf('\n')>=0)multi=true;
+        put(row,c,txt,{bold:bold||td.classList.contains('mx-3')||!!td.querySelector('b'),fill:f,align:isL?'left':(td.classList.contains('mx')?'center':'right'),color:over?XL.red:(td.classList.contains('mx-3')?XL.green:XL.text),numeric:true});
+        if(cs>1)ws.mergeCells(row,c,row,c+cs-1);
+        c+=cs;
+      });
+      ws.getRow(row).height=multi?30:18;row++;
+    });
+    // column widths + freeze panes on header and the ID/Store columns
+    for(var ci=1;ci<=ncol;ci++){
+      var hdr=(ws.getCell(r0+1,ci).value||'')+'';
+      ws.getColumn(ci).width=ci===1&&/ID/.test(hdr)?8:/Store|Item/.test(hdr)?(S.wlTab==='item'?36:22):S.wlTab==='matrix'&&ci>2?13:14;
+    }
+    var frozenCols=S.wlTab==='matrix'||S.wlTab==='store'?2:1;
+    ws.views=[{state:'frozen',xSplit:frozenCols,ySplit:headerEnd,showGridLines:false}];
+    var foot=ws.getCell(row+1,1);foot.value='Sell-through = cases sold ÷ cases allocated · Exported '+new Date().toLocaleString('en-PH')+' by '+S.me.name;foot.font={size:9,italic:true,color:{argb:'FF'+XL.muted}};
+    var buf=await wb.xlsx.writeBuffer();
+    var a=document.createElement('a');a.href=URL.createObjectURL(new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));a.download=wlExportName('xlsx');document.body.appendChild(a);a.click();
+    setTimeout(function(){URL.revokeObjectURL(a.href);a.remove()},1000);toast('Exported '+wlExportName('xlsx'),'success');
+  });
+}
+async function exportWlPng(btn){
+  var tbl=wlTableEl();if(!tbl){toast('Nothing to export yet.','warning');return}
+  await busyExport(btn,'PNG',async function(){
+    var h2c=await loadLib('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js','html2canvas');
+    var root=document.documentElement,prevTheme=root.getAttribute('data-theme');root.setAttribute('data-theme','light');
+    var snap=document.createElement('div');snap.className='snap';
+    var legend=document.querySelector('#wlBody .mx-legend');
+    snap.innerHTML='<div class="snap-head"><img src="/favicon-64.png" alt=""><div><div class="snap-title">Wines &amp; Liquor · '+esc(wlViewName().replace(' x ',' \u00d7 '))+'</div><div class="snap-sub">'+esc(wlExportSubtitle())+'</div></div></div>'+(legend?legend.outerHTML:'')+'<div class="card"><div class="table-wrap">'+tbl.outerHTML+'</div></div><div class="snap-foot">Sell-through = cases sold ÷ cases allocated · Generated '+esc(new Date().toLocaleString('en-PH'))+'</div>';
+    document.body.appendChild(snap);
+    try{
+      await new Promise(function(r){var im=snap.querySelector('img');if(im.complete)r();else{im.onload=r;im.onerror=r}});
+      var canvas=await h2c(snap,{scale:2,backgroundColor:'#ffffff',logging:false,useCORS:true});
+      var blob=await new Promise(function(r){canvas.toBlob(r,'image/png')});
+      var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=wlExportName('png');document.body.appendChild(a);a.click();
+      setTimeout(function(){URL.revokeObjectURL(a.href);a.remove()},1000);toast('Exported '+wlExportName('png'),'success');
+    }finally{snap.remove();if(prevTheme)root.setAttribute('data-theme',prevTheme);else root.removeAttribute('data-theme')}
+  });
 }
 
 /* ================= Actions ================= */
@@ -2184,6 +2319,8 @@ document.addEventListener('click',function(e){
   else if(a==='wl-tab'){S.wlTab=el.getAttribute('data-t');renderWlViewerBody()}
   else if(a==='wl-sort'){nextSort(S.wlSort,el.getAttribute('data-k'));renderWlViewerBody()}
   else if(a==='wl-export'){exportWl()}
+  else if(a==='wl-xlsx'){exportWlXlsx(el)}
+  else if(a==='wl-png'){exportWlPng(el)}
   else if(a==='clear-hist'){S.histQ='';renderHistory()}
   else if(a==='clear-userq'){S.userQ='';renderUsers()}
 });
